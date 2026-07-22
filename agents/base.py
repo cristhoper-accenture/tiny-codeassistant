@@ -8,7 +8,7 @@ import re
 import os
 
 import llm
-from config import DEFAULT_MODEL, MAX_ITERATIONS
+from config import DEFAULT_MODEL, AGENT_MODELS, MAX_ITERATIONS
 from tools.registry import TOOLS, execute_tool
 
 try:
@@ -32,9 +32,12 @@ class BaseAgent:
     label: str = "Assistant"
     border_color: str = "blue"
 
-    def __init__(self, model: str = DEFAULT_MODEL, cwd: str = None):
-        self.model = model
+    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0):
+        # None → use the per-agent model from AGENT_MODELS; explicit value → override for all agents.
+        self._model_override = model
+        self.model = model if model is not None else AGENT_MODELS.get(self.name, DEFAULT_MODEL)
         self.cwd = cwd or os.getcwd()
+        self._depth = _depth
 
     # ── Subclasses override these ──────────────────────────────────────────────
 
@@ -43,10 +46,32 @@ class BaseAgent:
 
     def handle_special_action(self, action: str, action_input: dict) -> str | None:
         """
-        Handle actions that are not tool calls (e.g. 'plan').
-        Return an observation string to feed back, or None to treat as unknown tool.
+        Handle actions that are not standard tool calls (e.g. 'plan', 'delegate_to_agent').
+        Subclasses should handle their own actions and fall through to super() for the rest.
+        Returns an observation string, or None to fall through to the tool registry.
         """
-        return None
+        if action != "delegate_to_agent":
+            return None
+
+        from agents import REGISTRY
+        agent_name = action_input.get("agent", "")
+        task = action_input.get("task", "")
+
+        if not agent_name or not task:
+            return "ERROR: delegate_to_agent requires 'agent' and 'task' parameters."
+
+        valid = [n for n in REGISTRY if n != "orchestrator"]
+        if agent_name not in valid:
+            return f"ERROR: Unknown agent '{agent_name}'. Available: {', '.join(valid)}"
+
+        if self._depth >= 1:
+            return "ERROR: Delegation depth limit reached. Handle this task directly."
+
+        self._print_delegation(agent_name, task)
+        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd, _depth=self._depth + 1)
+        answer, new_cwd = sub.run(task)
+        self.cwd = new_cwd
+        return f"[Delegated to {agent_name} agent]\n{answer}"
 
     # ── ReAct loop ─────────────────────────────────────────────────────────────
 
@@ -57,6 +82,7 @@ class BaseAgent:
             {"role": "user", "content": user_input},
         ]
 
+        _format_misses = 0
         for _ in range(MAX_ITERATIONS):
             raw = llm.chat(messages, model=self.model)
             messages.append({"role": "assistant", "content": raw})
@@ -64,6 +90,25 @@ class BaseAgent:
             action_obj = self._extract_action(raw)
 
             if action_obj is None:
+                # If the response looks like prose or code (not a final answer), nudge the
+                # model back to the required JSON format instead of silently bailing out.
+                _format_misses += 1
+                if _format_misses <= 2 and any(tok in raw for tok in ("```", "def ", "import ", "class ")):
+                    self._print_format_warning(raw)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your response was not in the required format. "
+                            "You MUST reply with a single JSON block like this:\n"
+                            "```json\n"
+                            "{\"thought\": \"<reasoning>\", "
+                            "\"action\": \"<tool_name or final_answer>\", "
+                            "\"action_input\": {<parameters>}}\n"
+                            "```\n"
+                            "Do not write prose or raw code outside that block."
+                        ),
+                    })
+                    continue
                 self._print_answer(raw)
                 return raw, self.cwd
 
@@ -100,6 +145,9 @@ class BaseAgent:
 
     def _tool_docs(self, names: list[str] = None) -> str:
         tools = TOOLS if names is None else [t for t in TOOLS if t["name"] in names]
+        # Sub-agents (depth >= 1) cannot delegate further — hide the tool to avoid confusion.
+        if self._depth >= 1:
+            tools = [t for t in tools if t["name"] != "delegate_to_agent"]
         return "\n".join(
             f"- **{t['name']}**: {t['description']}\n  Parameters: {json.dumps(t['parameters'])}"
             for t in tools
@@ -144,12 +192,30 @@ class BaseAgent:
     def _print_tool_result(self, result: str) -> None:
         preview = result[:500] + ("…" if len(result) > 500 else "")
         if _RICH:
+            from rich.markup import escape
             _console.print(Panel(
-                f"{preview}\n[dim]cwd: {self._cwd_display()}[/dim]",
+                f"{escape(preview)}\n[dim]cwd: {self._cwd_display()}[/dim]",
                 title="[green]Result[/green]", border_style="green",
             ))
         else:
             print(f"[Result] {preview}\n[cwd: {self.cwd}]")
+
+    def _print_format_warning(self, raw: str) -> None:
+        preview = raw[:120] + ("…" if len(raw) > 120 else "")
+        if _RICH:
+            _console.print(f"[bold yellow]  ⚠ JSON format missing — nudging model.[/bold yellow] [dim]{preview}[/dim]")
+        else:
+            print(f"  [format warning] Expected JSON, got prose. Retrying.\n  {preview}")
+
+    def _print_delegation(self, agent_name: str, task: str) -> None:
+        preview = task[:120] + ("…" if len(task) > 120 else "")
+        if _RICH:
+            _console.print(
+                f"\n[dim]  Delegating to[/dim] [bold cyan]{agent_name}[/bold cyan]"
+                f"[dim]: {preview}[/dim]"
+            )
+        else:
+            print(f"\n  [Delegate → {agent_name}] {preview}")
 
     def _print_answer(self, text: str) -> None:
         if _RICH:

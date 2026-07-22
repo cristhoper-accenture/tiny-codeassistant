@@ -124,6 +124,7 @@ Use `final_answer` with a structured summary:
 - Prefer relative paths — they resolve from the cwd above
 - If lint or tests fail, fix them before calling `final_answer`
 - Do not invent file names or APIs — verify they exist with `find_files` or `grep_code` first
+- **CRITICAL**: Do NOT call `final_answer` until every file listed in `files_create` and `files_modify` has been written to disk with `write_file` or `edit_file`. Installing packages is NOT the final step — you must still write the code.
 
 ## Available tools
 
@@ -142,7 +143,7 @@ Use `final_answer` with a structured summary:
 
     def handle_special_action(self, action: str, action_input: dict) -> str | None:
         if action != "plan":
-            return None
+            return super().handle_special_action(action, action_input)
 
         summary = action_input.get("summary", "")
         steps = action_input.get("steps", [])

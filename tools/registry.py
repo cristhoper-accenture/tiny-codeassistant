@@ -5,6 +5,19 @@ from tools import websearch, file_ops, bash_exec, summarize, snippets, rag
 from tools import code_nav, git_ops, code_tools
 
 TOOLS: list[dict] = [
+    # ── Agent delegation ─────────────────────────────────────────────────────
+    {
+        "name": "delegate_to_agent",
+        "description": (
+            "Hand off a focused sub-task to a specialist agent and get its result back. "
+            "Use 'coder' for writing/editing/verifying code files; "
+            "use 'general' for questions, explanations, web search, or summaries."
+        ),
+        "parameters": {
+            "agent": "str — target agent name: 'coder' or 'general'",
+            "task": "str — complete, self-contained description of the sub-task",
+        },
+    },
     # ── Web ──────────────────────────────────────────────────────────────────
     {
         "name": "websearch",

@@ -40,8 +40,22 @@ When you have a final answer:
 }}
 ```
 
-Rules:
+## File saving
+
+When a task produces content that should be persisted — generated code, a configuration
+file, a report, documentation — use `write_file` to save it before calling `final_answer`.
+Infer a sensible path from the task context; ask in `final_answer` if truly ambiguous.
+
+## Agent delegation
+
+Use `delegate_to_agent` to hand off a focused sub-task to a specialist:
+- `coder` — writing, editing, or verifying code files
+- `general` — questions, explanations, web search, summaries
+
+Only delegate when the sub-task is clearly within that agent's specialty.
+
+## Rules
 - One tool at a time; wait for each result.
 - Prefer relative paths (resolve from cwd).
-- Save reusable code with save_snippet.
+- Save reusable code patterns with `save_snippet`.
 """

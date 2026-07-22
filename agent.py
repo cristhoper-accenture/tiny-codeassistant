@@ -19,7 +19,6 @@ import os
 import argparse
 
 import llm
-from config import DEFAULT_MODEL
 from agents import REGISTRY, DEFAULT_AGENT
 
 
@@ -36,7 +35,10 @@ def main() -> None:
         choices=list(REGISTRY.keys()),
         help=f"Agent to use (default: {DEFAULT_AGENT}). Choices: {', '.join(REGISTRY)}",
     )
-    parser.add_argument("--model", "-m", default=DEFAULT_MODEL, help="Ollama model name")
+    parser.add_argument(
+        "--model", "-m", default=None,
+        help="Override model for all agents (default: each agent uses its AGENT_MODELS config entry)",
+    )
     parser.add_argument("--cwd", default=None, help="Starting working directory (default: current dir)")
     parser.add_argument("--list-agents", action="store_true", help="List available agents and exit")
     parser.add_argument("--list-models", action="store_true", help="List available Ollama models and exit")

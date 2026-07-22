@@ -10,7 +10,7 @@ full ReAct loop. CWD is shared and persisted across all turns.
 import os
 
 import llm
-from config import DEFAULT_MODEL
+from config import AGENT_MODELS, DEFAULT_MODEL
 from agents.base import BaseAgent
 
 try:
@@ -65,9 +65,10 @@ class OrchestratorAgent(BaseAgent):
     label = "Orchestrator"
     border_color = "white"
 
-    # Use the fastest available model for routing to keep latency low.
-    # The sub-agent uses self.model (the user's chosen model).
-    _ROUTER_MODEL = "qwen3.5:2b"
+    # Fast model for routing — uses AGENT_MODELS["orchestrator"] from config.
+    @property
+    def _ROUTER_MODEL(self) -> str:
+        return AGENT_MODELS.get("orchestrator", DEFAULT_MODEL)
 
     def build_system_prompt(self) -> str:
         # The orchestrator never runs its own ReAct loop, so this is unused,
@@ -108,7 +109,8 @@ class OrchestratorAgent(BaseAgent):
         self._print_routing(agent_name, user_input)
 
         from agents import REGISTRY
-        sub = REGISTRY[agent_name](model=self.model, cwd=self.cwd)
+        # Propagate the raw override (None = each sub-agent uses its own configured model).
+        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd)
         answer, new_cwd = sub.run(user_input)
         self.cwd = new_cwd  # persist cwd for the next turn
         return answer, new_cwd

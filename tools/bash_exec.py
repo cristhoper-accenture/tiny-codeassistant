@@ -3,7 +3,7 @@
 import subprocess
 from config import BASH_TIMEOUT
 
-_BLOCKED = {"rm -rf /", "mkfs", ":(){:|:&};:", "dd if=/dev/zero"}
+_BLOCKED = {"rm -rf /", "mkfs", ":(){:|:&};:", "dd if=/dev/zero", "sudo", "shutdown", "reboot", "init 0", "init 6", "poweroff", "ssh", "scp", "ftp", "telnet", "nc", "netcat", "curl -O", "wget -O", "chmod 777 /", "chown root:root /", "mount /dev/sda1 /mnt", "umount /mnt"}
 
 
 def run(command: str, cwd: str = None, timeout: int = BASH_TIMEOUT) -> dict:

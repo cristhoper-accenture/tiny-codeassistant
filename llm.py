@@ -1,8 +1,11 @@
 """Ollama client wrapper using the /api/chat endpoint."""
 
-import json
+import os
 import requests
 from config import OLLAMA_BASE_URL, DEFAULT_MODEL
+
+# Larger models (9b+) can take several minutes to generate long code blocks.
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "300"))
 
 
 def chat(messages: list[dict], model: str = DEFAULT_MODEL, stream: bool = False) -> str:
@@ -13,7 +16,7 @@ def chat(messages: list[dict], model: str = DEFAULT_MODEL, stream: bool = False)
         "stream": stream,
         "options": {"temperature": 0.2},
     }
-    resp = requests.post(url, json=payload, timeout=120)
+    resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     return data["message"]["content"]

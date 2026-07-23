@@ -1,0 +1,174 @@
+# codeassistant — LLM context summary
+
+## What this project is
+A local, offline AI code assistant. It runs a multi-agent ReAct (Reason + Act) loop powered entirely by Ollama. An orchestrator classifies each user task and delegates it to a specialist agent (coder or general). Each agent reasons step-by-step and calls tools until the task is done. No external APIs required except Ollama running at localhost:11434.
+
+## Entry points
+- `python agent.py` — REPL, defaults to orchestrator agent
+- `python agent.py "task"` — single-shot
+- `python agent.py --agent coder|general|orchestrator "task"` — force agent
+- `python agent.py --model <name>` — override model for all agents
+- `python agent.py --cwd /path "task"` — set working directory
+- `./run.sh` — wrapper that invokes .venv/bin/python agent.py
+
+## Key files
+- `agent.py` — argparse CLI, instantiates agent, calls run() or repl()
+- `llm.py` — thin Ollama HTTP client: chat(), embed(), list_models()
+- `config.py` — all tunables as env vars with defaults
+- `agents/base.py` — BaseAgent: ReAct loop, tool dispatch, delegation
+- `agents/orchestrator.py` — routes tasks via a fast single LLM call
+- `agents/coder.py` — 5-phase coding workflow (explore/plan/implement/verify/report)
+- `agents/general.py` — open-ended ReAct with all tools
+- `agents/__init__.py` — REGISTRY dict mapping name → class
+- `tools/registry.py` — TOOLS list (schemas) + execute_tool() dispatcher
+- `tools/file_ops.py` — read_file, write_file, edit_file, list_dir
+- `tools/bash_exec.py` — safe shell execution; tracks cwd via `pwd` append
+- `tools/code_nav.py` — grep_code, find_files, code_outline, read_lines
+- `tools/git_ops.py` — status, diff, log, commit, branch, checkout, blame
+- `tools/code_tools.py` — lint, run_tests, explain_code, fix_code, generate_tests, review_code
+- `tools/websearch.py` — DuckDuckGo search via ddgs
+- `tools/summarize.py` — LLM text summarisation
+- `tools/snippets.py` — persistent code snippet store (filesystem)
+- `tools/rag.py` — chunk, embed, cosine-search RAG store (numpy, no external DB)
+
+## Config (config.py) — env vars and defaults
+- OLLAMA_BASE_URL=http://localhost:11434
+- AGENT_MODEL=qwen2.5-coder:3b  (global fallback)
+- AGENT_MODELS: orchestrator=qwen3.5:2b, coder=qwen2.5-coder:3b, general=qwen2.5-coder:3b
+  (override with ORCHESTRATOR_MODEL, CODER_MODEL, GENERAL_MODEL env vars)
+- AGENT_MAX_ITER=15 (max ReAct iterations per run)
+- LLM_TIMEOUT=300 (seconds, increase for large models)
+- BASH_TIMEOUT=30 (seconds per shell command)
+- EMBED_MODEL=qwen3-embedding:4b
+- RAG_CHUNK_SIZE=600, RAG_CHUNK_OVERLAP=80
+
+## Agent hierarchy
+OrchestratorAgent → (routes via fast LLM call) → CoderAgent | GeneralAgent
+Any depth-0 agent can delegate a sub-task to another agent via delegate_to_agent tool.
+Delegation is capped at depth=1 to prevent recursion.
+
+## BaseAgent (agents/base.py) — the parent class
+All agents inherit from BaseAgent. Key attributes:
+- name: str — used for AGENT_MODELS lookup
+- model: resolved from _model_override or AGENT_MODELS[name]
+- _model_override: raw --model arg; None = use per-agent config; propagated to sub-agents
+- cwd: str — current working directory, mutated by bash and change_dir tools
+- _depth: int — delegation depth (0 = top-level, 1 = delegated sub-agent)
+
+Abstract method subclasses must implement:
+- build_system_prompt() -> str — the full system prompt injected at position 0 each iteration
+
+Optional override:
+- handle_special_action(action, action_input) -> str | None
+  Called before execute_tool(). Return an observation string to continue the loop, or None
+  to fall through to the tool registry. ALWAYS call super().handle_special_action() for
+  unknown actions so delegation continues to work in subclasses.
+
+ReAct loop (run method):
+1. Build messages = [system_prompt, user_message]
+2. Loop up to MAX_ITERATIONS:
+   a. llm.chat(messages) → raw string
+   b. _extract_action(raw) → dict | None (searches for ```json block, falls back to first {})
+   c. If None (no JSON): if looks like prose/code and misses<=2, inject correction and retry;
+      else treat as final answer and return.
+   d. If action == "final_answer": print answer, return.
+   e. Call handle_special_action(action, action_input).
+      - "delegate_to_agent": spawn sub-agent, run task, return result as observation.
+      - "plan" (CoderAgent): display plan, return acknowledgement.
+      - None: fall through to execute_tool.
+   f. execute_tool(action, action_input, cwd) → (result_str, new_cwd)
+   g. Append "Observation: <result>" to messages, update cwd, continue.
+
+JSON-enforcement retry: when a model returns prose instead of JSON (detected by presence of
+``` or "def " or "import " or "class "), the loop injects a correction message asking for
+JSON format and retries, up to 2 times. This prevents small models from silently skipping
+the ReAct loop.
+
+Tool docs: _tool_docs(names?) renders TOOLS into markdown. Sub-agents (depth>=1) have
+delegate_to_agent stripped from their docs to prevent recursive chains.
+
+## CoderAgent (agents/coder.py)
+Enforces a 5-phase workflow via system prompt and special action handling:
+1. EXPLORE — read-only: list_dir, find_files, grep_code, code_outline, read_file, git_status
+2. PLAN — emits {action:"plan", action_input:{summary,steps,files_create,files_modify}}
+   handle_special_action displays the plan and returns acknowledgement, then IMPLEMENT begins
+3. IMPLEMENT — write_file, edit_file, bash; lint after each file
+4. VERIFY — lint all changed files, run_tests if suite exists, git_status
+5. REPORT — final_answer with structured summary (changes, what was done, verification)
+Rules enforced in system prompt: never write before reading, one tool per response,
+do NOT call final_answer until all planned files are written to disk.
+
+## GeneralAgent (agents/general.py)
+Open-ended ReAct with all tools. System prompt instructs to:
+- Use write_file when a task produces content to persist (code, docs, reports)
+- Use delegate_to_agent for sub-tasks that fit coder or general specialty
+- Save reusable patterns with save_snippet
+
+## OrchestratorAgent (agents/orchestrator.py)
+Does not run its own ReAct loop. Instead:
+1. Builds a short routing prompt with agent descriptions and the user's request
+2. Calls llm.chat with ORCHESTRATOR_MODEL (fast, small model) for a single token response
+3. Parses the response to get agent name; falls back to keyword heuristic if LLM returns unexpected output
+4. Instantiates the chosen sub-agent with model=self._model_override and cwd=self.cwd
+5. Runs the sub-agent, persists updated cwd for the next REPL turn
+
+## Tool registry (tools/registry.py)
+TOOLS: list of dicts with keys name, description, parameters (dict of param→type description).
+execute_tool(name, params, cwd) -> (result_str, new_cwd): large if/elif dispatch.
+Returns "Unknown tool: <name>" for unrecognised actions (reached only if handle_special_action
+returned None for that action).
+
+## Tools — complete list
+delegate_to_agent(agent, task) — delegate sub-task; handled in BaseAgent, not execute_tool
+websearch(query, max_results?) — DuckDuckGo via ddgs
+read_file(path) — full file read
+read_lines(path, start?, end?) — line range read
+write_file(path, content) — create or overwrite
+edit_file(path, old_text, new_text) — replace first occurrence
+list_dir(path?) — directory listing
+change_dir(path) — mutates agent.cwd
+bash(command, timeout?) — shell; safe list blocks rm -rf /, sudo, mkfs, etc.; cwd tracked
+grep_code(pattern, path?, file_glob?, case_sensitive?, max_matches?) — regex search
+find_files(pattern, path?, max_results?) — glob filename search
+code_outline(path) — AST-based outline (Python) or regex (JS/TS)
+git_status() — branch + changed files
+git_diff(path?, staged?) — diff
+git_log(n?) — recent commits
+git_commit(message, files?) — stage + commit
+git_branch() — list branches
+git_checkout(ref, create?) — switch or create branch
+git_blame(path) — per-line authorship
+explain_code(code, language?) — LLM explanation
+fix_code(code, error, language?) — LLM root cause + fix
+generate_tests(code, language?, framework?) — LLM test generation
+review_code(code, language?) — LLM structured review
+lint(path) — ruff/flake8/pylint for .py; eslint for .js/.ts; AST fallback
+run_tests(path?, pattern?, verbose?) — pytest or unittest
+summarize(text, focus?) — LLM summarisation
+save_snippet(name, code, language?, description?) — persist to snippets/
+get_snippet(name) — retrieve snippet
+list_snippets() — all snippets
+delete_snippet(name) — remove snippet
+rag_add_text(name, text, collection?) — chunk + embed + store
+rag_add_file(path, collection?) — read file then ingest
+rag_add_url(url, collection?) — fetch page then ingest
+rag_search(query, collection?, top_k?) — cosine similarity search
+rag_list(collection?) — list documents
+rag_collections() — list all collections
+rag_delete(source, collection?) — remove document
+
+## Adding a new agent — checklist
+1. Create agents/myagent.py, inherit BaseAgent, set name/label/border_color, implement build_system_prompt()
+2. Register in agents/__init__.py REGISTRY
+3. Add "myagent" entry to AGENT_MODELS in config.py
+4. Add routing description to _AGENT_DESCRIPTIONS in agents/orchestrator.py
+
+## Adding a new tool — checklist
+1. Implement function in tools/*.py returning a string
+2. Add definition dict to TOOLS list in tools/registry.py
+3. Add elif branch to execute_tool() in tools/registry.py
+Tool appears automatically in all agents' _tool_docs() output.
+
+## Adding a special action — checklist
+Override handle_special_action in your agent class. Handle your action, return observation string.
+Call super().handle_special_action(action, action_input) for all other actions.

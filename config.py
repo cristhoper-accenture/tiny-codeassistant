@@ -15,6 +15,6 @@ RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "80"))
 # Override individually: CODER_MODEL=qwen2.5-coder:7b python agent.py
 AGENT_MODELS: dict[str, str] = {
     "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "qwen3.5:2b"),
-    "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:7b"),
+    "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:3b"),
     "general":      os.getenv("GENERAL_MODEL",      DEFAULT_MODEL),
 }

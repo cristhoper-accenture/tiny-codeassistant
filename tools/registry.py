@@ -65,6 +65,19 @@ TOOLS: list[dict] = [
         "parameters": {"path": "str (optional, default '.') — directory path"},
     },
     {
+        "name": "make_dir",
+        "description": "Create a directory (and any missing parents). No-op if it already exists.",
+        "parameters": {"path": "str — directory path to create (relative or absolute)"},
+    },
+    {
+        "name": "remove_dir",
+        "description": "Remove a directory. Fails if non-empty unless recursive=true.",
+        "parameters": {
+            "path": "str — directory path to remove",
+            "recursive": "bool (optional, default false) — remove contents recursively",
+        },
+    },
+    {
         "name": "change_dir",
         "description": "Change the current working directory. Persists for all subsequent calls.",
         "parameters": {"path": "str — absolute or relative path"},
@@ -323,6 +336,12 @@ def execute_tool(name: str, params: dict, cwd: str) -> tuple[str, str]:
 
         elif name == "list_dir":
             return file_ops.list_dir(params.get("path", "."), cwd), cwd
+
+        elif name == "make_dir":
+            return file_ops.make_dir(params["path"], cwd), cwd
+
+        elif name == "remove_dir":
+            return file_ops.remove_dir(params["path"], params.get("recursive", False), cwd), cwd
 
         elif name == "change_dir":
             target = os.path.expanduser(params["path"])

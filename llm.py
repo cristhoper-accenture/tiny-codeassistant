@@ -29,6 +29,21 @@ def embed(text: str, model: str = "qwen3-embedding:4b") -> list[float]:
     return resp.json()["embedding"]
 
 
+def preload(model: str = DEFAULT_MODEL) -> None:
+    """Load model weights into Ollama memory before the first real call.
+
+    Uses /api/generate with no prompt — the canonical Ollama warm-up call.
+    keep_alive=-1 holds the model in memory for the session.
+    """
+    url = f"{OLLAMA_BASE_URL}/api/generate"
+    resp = requests.post(
+        url,
+        json={"model": model, "keep_alive": -1},
+        timeout=LLM_TIMEOUT,
+    )
+    resp.raise_for_status()
+
+
 def list_models() -> list[str]:
     resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=10)
     resp.raise_for_status()

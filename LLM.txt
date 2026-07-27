@@ -126,6 +126,8 @@ read_lines(path, start?, end?) — line range read
 write_file(path, content) — create or overwrite
 edit_file(path, old_text, new_text) — replace first occurrence
 list_dir(path?) — directory listing
+make_dir(path) — create directory (and parents); no-op if exists
+remove_dir(path, recursive?) — remove directory; recursive=true for non-empty
 change_dir(path) — mutates agent.cwd
 bash(command, timeout?) — shell; safe list blocks rm -rf /, sudo, mkfs, etc.; cwd tracked
 grep_code(pattern, path?, file_glob?, case_sensitive?, max_matches?) — regex search

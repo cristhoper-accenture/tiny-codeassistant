@@ -25,6 +25,8 @@ def write_file(path: str, content: str, cwd: str = ".") -> str:
 
 
 def edit_file(path: str, old_text: str, new_text: str, cwd: str = ".") -> str:
+    if not old_text:
+        return "ERROR: old_text must not be empty; use write_file to overwrite the entire file"
     path = _resolve(path, cwd)
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -44,3 +46,24 @@ def list_dir(path: str = ".", cwd: str = ".") -> str:
         tag = "/" if os.path.isdir(full) else ""
         entries.append(f"{entry}{tag}")
     return f"[{path}]\n" + ("\n".join(entries) if entries else "(empty)")
+
+
+def make_dir(path: str, cwd: str = ".") -> str:
+    path = _resolve(path, cwd)
+    os.makedirs(path, exist_ok=True)
+    return f"Directory created: {path}"
+
+
+def remove_dir(path: str, recursive: bool = False, cwd: str = ".") -> str:
+    import shutil
+    path = _resolve(path, cwd)
+    if not os.path.isdir(path):
+        return f"ERROR: not a directory: {path}"
+    if recursive:
+        shutil.rmtree(path)
+        return f"Removed directory (recursive): {path}"
+    try:
+        os.rmdir(path)
+        return f"Removed directory: {path}"
+    except OSError as e:
+        return f"ERROR: {e} (use recursive=true to remove non-empty directories)"

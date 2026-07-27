@@ -24,7 +24,109 @@ except ImportError:
     _console = None
     _RICH = False
 
-_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_FENCE_RE = re.compile(r"```(?:json)?\s*", re.DOTALL)
+_CODE_BLOCK_RE = re.compile(r"```(?!json\b)(\w+)\n(.*?)\n```", re.DOTALL)
+_TRIPLE_QUOTE_RE = re.compile(r'"""(.*?)"""', re.DOTALL)
+
+
+def _extract_balanced(text: str, start: int) -> str | None:
+    """Return the JSON object starting at `start` by counting braces (string-aware)."""
+    depth = 0
+    in_string = False
+    i = start
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+        else:
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        i += 1
+    return None
+
+
+def _repair_json(text: str) -> str:
+    """Escape bare newlines/tabs inside JSON string literals — common small-model mistake."""
+    result = []
+    in_string = False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if c == "\\" and i + 1 < len(text):
+                result.append(c)
+                result.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            elif c == "\n":
+                result.append("\\n")
+                i += 1
+                continue
+            elif c == "\r":
+                result.append("\\r")
+                i += 1
+                continue
+            elif c == "\t":
+                result.append("\\t")
+                i += 1
+                continue
+        else:
+            if c == '"':
+                in_string = True
+        result.append(c)
+        i += 1
+    return "".join(result)
+
+
+def _normalize_triple_quotes(text: str) -> str:
+    """Replace Python triple-quoted strings with JSON-safe double-quoted strings."""
+    def _replace(m: re.Match) -> str:
+        inner = (
+            m.group(1)
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        return f'"{inner}"'
+    return _TRIPLE_QUOTE_RE.sub(_replace, text)
+
+
+def _clean_action(obj: dict, raw_text: str) -> dict:
+    """
+    Post-process a parsed action:
+    - Strip markdown fences that the model wraps around file content.
+    - Recover `content` from a trailing code block when write_file omits it.
+    """
+    action_input = obj.get("action_input")
+    if not isinstance(action_input, dict):
+        return obj
+
+    content = action_input.get("content")
+    if isinstance(content, str) and content.strip().startswith("```"):
+        m = re.match(r"^```[^\n]*\n(.*?)\n?```\s*$", content.strip(), re.DOTALL)
+        if m:
+            action_input["content"] = m.group(1)
+
+    if obj.get("action") == "write_file" and not action_input.get("content"):
+        m = _CODE_BLOCK_RE.search(raw_text)
+        if m:
+            action_input["content"] = m.group(2)
+
+    return obj
 
 
 class BaseAgent:
@@ -154,19 +256,39 @@ class BaseAgent:
         )
 
     @staticmethod
+    def _try_extract(text: str) -> dict | None:
+        candidates: list[int] = []
+        for m in _FENCE_RE.finditer(text):
+            brace = text.find("{", m.end())
+            if brace != -1:
+                candidates.append(brace)
+        first_brace = text.find("{")
+        if first_brace != -1 and first_brace not in candidates:
+            candidates.append(first_brace)
+
+        for start in candidates:
+            chunk = _extract_balanced(text, start)
+            if not chunk:
+                continue
+            for candidate in (chunk, _repair_json(chunk)):
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict) and "action" in obj:
+                        return _clean_action(obj, text)
+                except json.JSONDecodeError:
+                    pass
+        return None
+
+    @staticmethod
     def _extract_action(text: str) -> dict | None:
-        m = _JSON_RE.search(text)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except json.JSONDecodeError:
-                pass
-        try:
-            start = text.index("{")
-            end = text.rindex("}") + 1
-            return json.loads(text[start:end])
-        except (ValueError, json.JSONDecodeError):
-            return None
+        result = BaseAgent._try_extract(text)
+        if result is not None:
+            return result
+        # Retry after converting Python triple-quoted strings to JSON strings.
+        normalized = _normalize_triple_quotes(text)
+        if normalized != text:
+            return BaseAgent._try_extract(normalized)
+        return None
 
     def _cwd_display(self) -> str:
         home = os.path.expanduser("~")

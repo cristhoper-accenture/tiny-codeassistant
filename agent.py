@@ -20,6 +20,29 @@ import argparse
 
 import llm
 from agents import REGISTRY, DEFAULT_AGENT
+from config import AGENT_MODELS, DEFAULT_MODEL
+
+
+def _preload_models(agent_name: str, model_override: str | None) -> None:
+    """Warm up Ollama models so the first real inference call is fast."""
+    if model_override:
+        models = [model_override]
+    elif agent_name == "orchestrator":
+        # Preload all unique models the orchestrator may delegate to.
+        seen: dict[str, None] = {}
+        for m in AGENT_MODELS.values():
+            seen[m] = None
+        models = list(seen)
+    else:
+        models = [AGENT_MODELS.get(agent_name, DEFAULT_MODEL)]
+
+    for model in models:
+        print(f"  Preloading {model}...", end=" ", flush=True)
+        try:
+            llm.preload(model)
+            print("ready.")
+        except Exception as e:
+            print(f"warning: {e}")
 
 
 def main() -> None:
@@ -57,6 +80,8 @@ def main() -> None:
 
     start_cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
     agent = REGISTRY[args.agent](model=args.model, cwd=start_cwd)
+
+    _preload_models(args.agent, args.model)
 
     if args.query:
         agent.run(args.query)

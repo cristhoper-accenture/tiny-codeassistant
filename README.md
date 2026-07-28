@@ -1,6 +1,6 @@
 # Code Assistant
 
-A local, fully offline AI code assistant powered by [Ollama](https://ollama.com). It runs a multi-agent ReAct loop — the orchestrator classifies each task and routes it to a specialist agent (coder or general), which then reasons step-by-step and calls tools until the task is complete.
+A local, fully offline AI code assistant powered by [Ollama](https://ollama.com). It runs a multi-agent ReAct loop — an orchestrator classifies each task and routes it to a specialist agent, which reasons step-by-step and calls tools until the task is complete. No external APIs, no cloud, no data leaves your machine.
 
 ---
 
@@ -11,9 +11,11 @@ A local, fully offline AI code assistant powered by [Ollama](https://ollama.com)
 3. [Usage](#usage)
 4. [Configuration](#configuration)
 5. [Agent Architecture](#agent-architecture)
-6. [BaseAgent — the parent class](#baseagent--the-parent-class)
-7. [Tools reference](#tools-reference)
-8. [Extending the codebase](#extending-the-codebase)
+6. [Documentation RAG](#documentation-rag)
+7. [Streaming](#streaming)
+8. [BaseAgent — the parent class](#baseagent--the-parent-class)
+9. [Tools reference](#tools-reference)
+10. [Extending the codebase](#extending-the-codebase)
 
 ---
 
@@ -21,12 +23,13 @@ A local, fully offline AI code assistant powered by [Ollama](https://ollama.com)
 
 - Python 3.11+
 - [Ollama](https://ollama.com) running locally on `http://localhost:11434`
-- The models you intend to use must be pulled beforehand:
 
+**Preset A (recommended, ~7.3 GB RAM):**
 ```bash
-ollama pull qwen2.5-coder:3b    # default coder / general model
-ollama pull qwen3.5:2b          # default orchestrator / router model
-ollama pull qwen3-embedding:4b  # required for RAG features
+ollama pull qwen2.5:0.5b        # orchestrator / router
+ollama pull qwen2.5-coder:7b    # coder + lint agents
+ollama pull phi4-mini:3.8b      # planner + general agents
+ollama pull qwen3-embedding:4b  # RAG embeddings
 ```
 
 ---
@@ -42,6 +45,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Warm up all models before the first run (eliminates cold-start latency):
+
+```bash
+./preload_models.sh
+```
+
 ---
 
 ## Usage
@@ -54,7 +63,9 @@ python agent.py
 python agent.py "explain what this repo does"
 
 # Force a specific agent
-python agent.py --agent coder "add type hints to utils.py"
+python agent.py --agent coder   "add type hints to utils.py"
+python agent.py --agent lint    "fix all ruff errors in src/"
+python agent.py --agent planner "plan how to add OAuth2 support"
 python agent.py --agent general "what is a REST API?"
 
 # Override the model for all agents (one-off)
@@ -63,13 +74,18 @@ python agent.py --model qwen2.5-coder:7b "refactor main.py"
 # Set the working directory the agent starts in
 python agent.py --cwd /path/to/myproject "fix the auth bug"
 
+# Disable streaming (wait for full response before display)
+python agent.py --no-stream "your task"
+
 # Convenience wrapper (uses the venv automatically)
 ./run.sh "your task"
 
-# List available agents
-python agent.py --list-agents
+# Warm up all models into Ollama memory before starting
+./preload_models.sh           # load Preset A defaults
+./preload_models.sh --unload  # release all models
 
-# List Ollama models currently pulled
+# List available agents / models
+python agent.py --list-agents
 python agent.py --list-models
 ```
 
@@ -79,10 +95,13 @@ All tunables can be set without touching code:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_MODEL` | `qwen2.5-coder:3b` | Global fallback model |
-| `ORCHESTRATOR_MODEL` | `qwen3.5:2b` | Model used for routing |
-| `CODER_MODEL` | `qwen2.5-coder:3b` | Model used by the coder agent |
-| `GENERAL_MODEL` | `qwen2.5-coder:3b` | Model used by the general agent |
+| `AGENT_MODEL` | `qwen2.5-coder:7b` | Global fallback model |
+| `ORCHESTRATOR_MODEL` | `qwen2.5:0.5b` | Routing model (needs to output one word) |
+| `CODER_MODEL` | `qwen2.5-coder:7b` | Code writing and editing |
+| `LINT_MODEL` | `qwen2.5-coder:7b` | Lint analysis and fixing |
+| `PLANNER_MODEL` | `phi4-mini:3.8b` | Implementation planning |
+| `GENERAL_MODEL` | `phi4-mini:3.8b` | Q&A, web search, doc indexing |
+| `STREAM_OUTPUT` | `true` | Stream tokens in real time (`false` to disable) |
 | `AGENT_MAX_ITER` | `15` | Max ReAct iterations per query |
 | `LLM_TIMEOUT` | `300` | Seconds before an Ollama call times out |
 | `BASH_TIMEOUT` | `30` | Seconds before a shell command is killed |
@@ -91,8 +110,7 @@ All tunables can be set without touching code:
 | `RAG_CHUNK_SIZE` | `600` | Token size for RAG document chunks |
 | `RAG_CHUNK_OVERLAP` | `80` | Overlap between adjacent chunks |
 
-Example — run the coder with a larger, slower model without editing config:
-
+Example — use a larger coder model for one run:
 ```bash
 CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "rewrite auth.py"
 ```
@@ -101,18 +119,19 @@ CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "rewr
 
 ## Configuration
 
-`config.py` is the single source of truth for all defaults. Every value reads from an environment variable with a fallback:
+`config.py` is the single source of truth for all defaults. Every value reads from an environment variable with a fallback. The defaults ship as **Preset A**, tuned for 16 GB RAM / 8 CPU cores:
 
 ```python
-# config.py (abbreviated)
-AGENT_MODELS = {
-    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "qwen3.5:2b"),
-    "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:3b"),
-    "general":      os.getenv("GENERAL_MODEL",      DEFAULT_MODEL),
+AGENT_MODELS: dict[str, str] = {
+    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "qwen2.5:0.5b"),
+    "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:7b"),
+    "lint":         os.getenv("LINT_MODEL",         "qwen2.5-coder:7b"),
+    "planner":      os.getenv("PLANNER_MODEL",      "phi4-mini:3.8b"),
+    "general":      os.getenv("GENERAL_MODEL",      "phi4-mini:3.8b"),
 }
 ```
 
-To permanently change a model assignment, edit the fallback string in `AGENT_MODELS`. To change it for a single run, set the env var.
+To permanently change a model assignment, edit the fallback string. To change it for a single run, set the env var.
 
 ---
 
@@ -121,135 +140,160 @@ To permanently change a model assignment, edit the fallback string in `AGENT_MOD
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        CLI (agent.py)                   │
-│  --agent  --model  --cwd  query                         │
+│  --agent  --model  --cwd  --no-stream  query            │
 └────────────────────────┬────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
 │              OrchestratorAgent                          │
 │                                                         │
-│  1. Single LLM call (ORCHESTRATOR_MODEL, fast)          │
-│     → classifies task as "coder" or "general"           │
-│  2. Instantiates the chosen sub-agent                   │
-│  3. Persists cwd across REPL turns                      │
-└──────────────┬──────────────────────┬───────────────────┘
-               │                      │
-               ▼                      ▼
-┌──────────────────────┐  ┌───────────────────────────────┐
-│     CoderAgent       │  │        GeneralAgent            │
-│  (CODER_MODEL)       │  │     (GENERAL_MODEL)            │
-│                      │  │                               │
-│  5-phase workflow:   │  │  Open-ended ReAct loop        │
-│  1. EXPLORE          │  │  with all tools               │
-│  2. PLAN             │  │                               │
-│  3. IMPLEMENT        │  │  Saves output to files        │
-│  4. VERIFY           │  │  when task requires it        │
-│  5. REPORT           │  │                               │
-└──────────┬───────────┘  └───────────────┬───────────────┘
-           │                              │
-           │   delegate_to_agent          │   delegate_to_agent
-           │ ◄────────────────────────────┘
-           │ ──────────────────────────── ►
-           │
-           ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Tool Registry                        │
-│                  (tools/registry.py)                    │
-│                                                         │
-│  File ops     │ read_file, write_file, edit_file,       │
-│               │ list_dir, change_dir, read_lines        │
-│  Shell        │ bash                                    │
-│  Code nav     │ grep_code, find_files, code_outline     │
-│  Git          │ status, diff, log, commit, branch,      │
-│               │ checkout, blame                         │
-│  Code tools   │ explain_code, fix_code, generate_tests, │
-│  (LLM-based)  │ review_code, lint, run_tests            │
-│  Web          │ websearch                               │
-│  Knowledge    │ snippets (save/get/list/delete)         │
-│               │ RAG (add_text/file/url, search, list)   │
-│  Agents       │ delegate_to_agent                       │
-└─────────────────────────────────────────────────────────┘
+│  1. Keyword pre-check (deterministic, no LLM call)      │
+│     docs/rag → general  |  lint/ruff → lint             │
+│     plan/spec → planner |  what/how → general           │
+│  2. LLM call (ORCHESTRATOR_MODEL) for ambiguous tasks   │
+│  3. Persists cwd and streaming flag across REPL turns   │
+└──────┬──────────┬──────────┬──────────┬─────────────────┘
+       │          │          │          │
+       ▼          ▼          ▼          ▼
+  Planner     Coder       Lint      General
+  Agent       Agent       Agent     Agent
+  (phi4-mini) (qwen2.5-   (qwen2.5- (phi4-mini)
+              coder:7b)   coder:7b)
+       │          │          │          │
+       └──────────┴──────────┴──────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │    Tool Registry    │
+              │  (tools/registry)   │
+              └─────────────────────┘
 ```
+
+### The four specialist agents
+
+| Agent | Invoked for | Workflow |
+|---|---|---|
+| **planner** | Planning, design docs, technical specs | UNDERSTAND → EXPLORE → ANALYZE → DRAFT → REPORT. Read-only; saves `plan_*.md` |
+| **coder** | Writing, editing, refactoring, bug fixes | EXPLORE → PLAN → IMPLEMENT → VERIFY → REPORT |
+| **lint** | Lint errors, style violations, code quality | DISCOVER → LINT → FIX → VERIFY → REPORT |
+| **general** | Q&A, web search, summaries, doc indexing | Open-ended ReAct with all tools |
 
 ### Agent communication
 
-Any top-level agent (depth 0) can call `delegate_to_agent` to hand off a focused sub-task:
+Any top-level agent (depth 0) can call `delegate_to_agent` to hand off a sub-task:
 
 ```json
 {
-  "thought": "I need to search the web for the correct API endpoint before I code",
+  "thought": "I need to search for the correct API endpoint",
   "action": "delegate_to_agent",
   "action_input": {
     "agent": "general",
-    "task": "Search the web for the Open-Meteo API URL for current weather in Santiago, Chile and return the exact endpoint URL and field names."
+    "task": "Search the web for the Open-Meteo API URL for current weather and return the exact endpoint."
   }
 }
 ```
 
-The sub-agent runs a full ReAct loop and returns its answer as an observation. Delegation is limited to one level deep to prevent recursive chains.
+Delegation is limited to one level deep to prevent recursive chains.
 
 ### CoderAgent — 5-phase workflow
 
-The coder enforces a strict sequence via its system prompt and a `plan` special action:
-
 | Phase | What happens | Key tools |
 |---|---|---|
-| 1. Explore | Read-only survey of the project | `find_files`, `code_outline`, `grep_code`, `git_status` |
-| 2. Plan | Emits a `plan` action — lists steps, files to create/modify | *(special action, not a tool)* |
-| 3. Implement | Writes and edits files, installs deps | `write_file`, `edit_file`, `bash` |
-| 4. Verify | Lints every changed file, runs tests if present | `lint`, `run_tests`, `git_status` |
+| 1. Explore | Read-only survey; queries `rag_search(collection="docs")` for library docs | `find_files`, `code_outline`, `grep_code`, `rag_search` |
+| 2. Plan | Emits a `plan` action — lists steps, files to create/modify | *(special action)* |
+| 3. Implement | Writes and edits files; lints after each file | `write_file`, `edit_file`, `bash` |
+| 4. Verify | Lints every changed file, runs tests if present | `lint`, `run_tests` |
 | 5. Report | Structured `final_answer` with summary | *(final_answer)* |
 
-`final_answer` is blocked (by a system prompt rule) until all planned files have been written.
+### LintAgent — 5-phase workflow
+
+| Phase | What happens |
+|---|---|
+| 1. Discover | Find files/dirs to lint; focus on git-changed files when scoped |
+| 2. Lint | Run linter on every target; collect all issues before touching anything |
+| 3. Fix | `edit_file` per flagged line; `fix_code` for complex issues; errors first |
+| 4. Verify | Re-lint every touched file; must be error-free before reporting |
+| 5. Report | Per-file issue counts, each fix made, remaining acceptable warnings |
+
+---
+
+## Documentation RAG
+
+The `docs` RAG collection is a shared knowledge base maintained by the **general agent** and queried automatically by coder, lint, and planner during their EXPLORE phases.
+
+### Indexing documentation
+
+```bash
+# Auto-routed to the general agent
+python agent.py "update docs for the httpx library"
+python agent.py "index the FastAPI documentation — getting started and API reference"
+python agent.py "refresh the numpy changelog"
+```
+
+The general agent will:
+1. Search for the official documentation URL
+2. Ingest key pages into `collection="docs"` with `rag_add_url` (re-ingesting auto-refreshes)
+3. Report what was indexed and the chunk count
+
+### Using indexed docs in code tasks
+
+Once indexed, any coding task involving those libraries automatically benefits:
+
+```bash
+python agent.py "implement a retry wrapper using httpx"
+# → coder EXPLORE phase queries rag_search("httpx retry", collection="docs")
+# → finds the relevant API docs and uses them in the implementation
+```
+
+### Querying manually
+
+```bash
+python agent.py --agent general "search the docs collection for httpx timeout configuration"
+```
+
+---
+
+## Streaming
+
+LLM output streams token by token in both REPL and single-shot modes by default.
+
+- **Rich terminal**: a `Live(transient=True)` panel fills as tokens arrive, then disappears — replaced by the formatted tool call or answer panel. No clutter.
+- **Plain terminal**: tokens print inline with flush, followed by a newline.
+- `STREAM_OUTPUT=false` or `--no-stream` to disable globally or per-run.
+
+```bash
+python agent.py --no-stream "your task"       # wait for full response
+STREAM_OUTPUT=false ./run.sh                  # disable globally
+```
 
 ---
 
 ## BaseAgent — the parent class
 
-`agents/base.py` defines `BaseAgent`, which all agents inherit from. It provides the complete ReAct loop, tool dispatch, display, and inter-agent delegation. Understanding it is the key to extending the system.
+`agents/base.py` defines `BaseAgent`, which all agents inherit from.
 
 ### Constructor
 
 ```python
-class BaseAgent:
-    name: str = "base"      # used to look up AGENT_MODELS
-    label: str = "Assistant"
-    border_color: str = "blue"
-
-    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0):
-        self._model_override = model          # raw CLI arg — None means "use per-agent config"
-        self.model = model if model is not None else AGENT_MODELS.get(self.name, DEFAULT_MODEL)
-        self.cwd = cwd or os.getcwd()
-        self._depth = _depth                  # delegation depth — max 1
+def __init__(self, model: str = None, cwd: str = None, _depth: int = 0, streaming: bool = None):
+    self._model_override = model   # None = use per-agent AGENT_MODELS config
+    self.model = ...               # resolved model name
+    self.cwd = cwd or os.getcwd()
+    self._depth = _depth           # delegation depth — max 1
+    self._streaming = ...          # from STREAM_OUTPUT config or explicit override
 ```
-
-- **`model=None`** means "use the model configured for this agent in `AGENT_MODELS`". Passing an explicit model string overrides that for this agent and all agents it delegates to.
-- **`_depth`** prevents recursive delegation: depth-0 agents can call `delegate_to_agent`; depth-1 agents cannot.
 
 ### Abstract interface
 
-Subclasses must implement one method:
-
 ```python
-def build_system_prompt(self) -> str:
-    """Return the full system prompt for this agent's ReAct loop."""
-    raise NotImplementedError
-```
+def build_system_prompt(self) -> str: ...          # required
 
-And may optionally override:
-
-```python
-def handle_special_action(self, action: str, action_input: dict) -> str | None:
-    """
-    Handle non-tool actions before they reach the tool registry.
-    Return an observation string to continue the loop, or None to fall through.
-    Always call super().handle_special_action(action, action_input) for unknown actions.
-    """
+def handle_special_action(self, action, action_input) -> str | None: ...  # optional
 ```
 
 `BaseAgent.handle_special_action` handles `delegate_to_agent`. `CoderAgent` overrides it to handle `plan`, then calls `super()` for everything else.
 
-### ReAct loop — step by step
+### ReAct loop
 
 ```
 run(user_input)
@@ -258,76 +302,43 @@ run(user_input)
 │
 └── for each iteration (up to MAX_ITERATIONS):
     │
-    ├── llm.chat(messages) → raw string
+    ├── _call_llm(messages) → raw string
+    │   ├── streaming=True:  Rich Live panel fills token-by-token, then vanishes
+    │   └── streaming=False: blocks until full response
     │
     ├── _extract_action(raw) → dict or None
-    │   ├── searches for ```json ... ``` block
-    │   └── falls back to first { ... } in the text
     │
-    ├── if None (no JSON found):
-    │   ├── if response looks like prose/code (≤2 misses):
-    │   │   └── append correction message → continue  ← JSON-enforcement retry
-    │   └── else: _print_answer(raw) → return
+    ├── if None: inject JSON correction (up to 2 retries) or treat as final answer
     │
-    ├── if action == "final_answer":
-    │   └── _print_answer(response) → return
+    ├── if action == "final_answer": display + return
     │
-    ├── handle_special_action(action, action_input)
-    │   ├── "delegate_to_agent" → spawn sub-agent, run task, return result
-    │   ├── "plan" (CoderAgent) → display plan, return acknowledgement
-    │   └── None → fall through to tool registry
+    ├── handle_special_action → observation or None
     │
-    ├── execute_tool(action, action_input, cwd) → (result, new_cwd)
-    │
-    ├── update cwd
-    └── append "Observation: <result>" → continue
+    └── execute_tool → (result, new_cwd) → append Observation → continue
 ```
-
-### JSON-enforcement retry
-
-When the model returns prose instead of a JSON action block, the loop detects it (by looking for ` ``` `, `def `, `import `, or `class ` in the response) and injects a correction message before retrying. This happens at most twice per run; after that the response is treated as a final answer. This prevents small models from silently short-circuiting the loop.
-
-### Tool docs injection
-
-Each agent's system prompt includes `self._tool_docs()`, which renders every tool's name, description, and parameter schema into a markdown list. Sub-agents (`_depth >= 1`) automatically have `delegate_to_agent` removed from their docs to prevent recursive delegation.
-
-### Display helpers
-
-All terminal output goes through helpers that gracefully degrade when `rich` is not installed:
-
-| Method | Output |
-|---|---|
-| `_print_thought(thought)` | Dimmed italic reasoning line |
-| `_print_tool_call(action, params)` | Yellow bordered panel with tool name + JSON params |
-| `_print_tool_result(result)` | Green bordered panel with result preview + cwd |
-| `_print_answer(text)` | Green bordered panel with Markdown-rendered final answer |
-| `_print_format_warning(raw)` | Yellow warning when JSON format is missing |
-| `_print_delegation(agent, task)` | Dim line showing delegation target |
-| `_print_banner()` | Startup header with model name and cwd |
 
 ---
 
 ## Tools reference
 
 ### File operations
-
 | Tool | Parameters | Description |
 |---|---|---|
 | `read_file` | `path` | Read full file contents |
-| `read_lines` | `path`, `start`, `end` | Read a line range (1-indexed) |
+| `read_lines` | `path`, `start?`, `end?` | Read a line range (1-indexed) |
 | `write_file` | `path`, `content` | Write or overwrite a file |
 | `edit_file` | `path`, `old_text`, `new_text` | Replace the first occurrence of `old_text` |
 | `list_dir` | `path?` | List directory entries |
+| `make_dir` | `path` | Create directory (and parents); no-op if exists |
+| `remove_dir` | `path`, `recursive?` | Remove directory |
 | `change_dir` | `path` | Change cwd (persists for the rest of the run) |
 
 ### Shell
-
 | Tool | Parameters | Description |
 |---|---|---|
-| `bash` | `command`, `timeout?` | Run a shell command; cwd persists via `pwd` tracking; dangerous commands are blocked |
+| `bash` | `command`, `timeout?` | Run a shell command; cwd persists; dangerous commands blocked |
 
 ### Code navigation
-
 | Tool | Parameters | Description |
 |---|---|---|
 | `grep_code` | `pattern`, `path?`, `file_glob?`, `case_sensitive?`, `max_matches?` | Regex search across source files |
@@ -335,7 +346,6 @@ All terminal output goes through helpers that gracefully degrade when `rich` is 
 | `code_outline` | `path` | Extract classes, functions, imports (AST for Python, regex for JS/TS) |
 
 ### Git
-
 | Tool | Parameters | Description |
 |---|---|---|
 | `git_status` | — | Working tree status |
@@ -347,9 +357,6 @@ All terminal output goes through helpers that gracefully degrade when `rich` is 
 | `git_blame` | `path` | Per-line authorship |
 
 ### LLM-powered code tools
-
-These call the local Ollama model directly — useful for tasks that are too complex for a single prompt line.
-
 | Tool | Parameters | Description |
 |---|---|---|
 | `explain_code` | `code`, `language?` | Plain-English explanation |
@@ -360,7 +367,6 @@ These call the local Ollama model directly — useful for tasks that are too com
 | `run_tests` | `path?`, `pattern?`, `verbose?` | pytest or unittest |
 
 ### Knowledge base
-
 | Tool | Parameters | Description |
 |---|---|---|
 | `save_snippet` | `name`, `code`, `language?`, `description?` | Save a reusable code snippet |
@@ -369,17 +375,22 @@ These call the local Ollama model directly — useful for tasks that are too com
 | `delete_snippet` | `name` | Remove a snippet |
 | `rag_add_text` | `name`, `text`, `collection?` | Ingest raw text into the RAG store |
 | `rag_add_file` | `path`, `collection?` | Ingest a file |
-| `rag_add_url` | `url`, `collection?` | Fetch and ingest a web page |
+| `rag_add_url` | `url`, `collection?` | Fetch and ingest a web page (idempotent — re-ingesting refreshes) |
 | `rag_search` | `query`, `collection?`, `top_k?` | Semantic search |
 | `rag_list` | `collection?` | List ingested documents |
 | `rag_collections` | — | List all collections |
 | `rag_delete` | `source`, `collection?` | Remove a document |
 
 ### Agent delegation
-
 | Tool | Parameters | Description |
 |---|---|---|
-| `delegate_to_agent` | `agent`, `task` | Hand off a sub-task to `coder` or `general`; returns the result as an observation |
+| `delegate_to_agent` | `agent`, `task` | Hand off a sub-task to a specialist agent |
+
+### Web
+| Tool | Parameters | Description |
+|---|---|---|
+| `websearch` | `query`, `max_results?` | DuckDuckGo search |
+| `summarize` | `text`, `focus?` | LLM-powered summarization |
 
 ---
 
@@ -387,143 +398,62 @@ These call the local Ollama model directly — useful for tasks that are too com
 
 ### Add a new agent
 
-1. Create `agents/myagent.py` inheriting from `BaseAgent`:
-
-```python
-from agents.base import BaseAgent
-
-class MyAgent(BaseAgent):
-    name = "myagent"          # used for AGENT_MODELS lookup and CLI --agent flag
-    label = "My Agent"
-    border_color = "cyan"
-
-    def build_system_prompt(self) -> str:
-        return f"""You are a specialist agent for ...
-
-## Current working directory
-`{self.cwd}`
-
-## Available tools
-{self._tool_docs()}
-
-## Response format
-```json
-{{"thought": "...", "action": "...", "action_input": {{...}}}}
-```
-"""
-```
-
-2. Register it in `agents/__init__.py`:
-
-```python
-from agents.myagent import MyAgent
-
-REGISTRY = {
-    "orchestrator": OrchestratorAgent,
-    "coder":        CoderAgent,
-    "general":      GeneralAgent,
-    "myagent":      MyAgent,       # add this line
-}
-```
-
-3. Add its model to `config.py`:
-
-```python
-AGENT_MODELS = {
-    ...
-    "myagent": os.getenv("MYAGENT_MODEL", DEFAULT_MODEL),
-}
-```
-
-4. Add it to the orchestrator's routing descriptions in `agents/orchestrator.py`:
-
-```python
-_AGENT_DESCRIPTIONS = {
-    ...
-    "myagent": "describe when to route here",
-}
-```
+1. Create `agents/myagent.py` inheriting from `BaseAgent`
+2. Register in `agents/__init__.py` REGISTRY
+3. Add model entry to `AGENT_MODELS` in `config.py`
+4. Add routing description to `_AGENT_DESCRIPTIONS` in `agents/orchestrator.py`
+5. Optionally add keyword signals to `_keyword_route` in `agents/orchestrator.py`
 
 ### Add a new tool
 
-1. Implement the function in an existing or new file under `tools/`:
+1. Implement the function in `tools/*.py` returning a string
+2. Add definition dict to `TOOLS` in `tools/registry.py`
+3. Add `elif` dispatch case to `execute_tool()` in `tools/registry.py`
 
-```python
-# tools/mytools.py
-def my_tool(param: str, cwd: str = ".") -> str:
-    ...
-    return "result string"
-```
-
-2. Add the definition to `TOOLS` in `tools/registry.py`:
-
-```python
-{
-    "name": "my_tool",
-    "description": "What it does and when to use it.",
-    "parameters": {
-        "param": "str — description",
-    },
-},
-```
-
-3. Add the dispatch case to `execute_tool` in `tools/registry.py`:
-
-```python
-elif name == "my_tool":
-    from tools.mytools import my_tool
-    return my_tool(params["param"], cwd), cwd
-```
-
-The tool now appears automatically in every agent's `_tool_docs()` output.
+The tool appears automatically in every agent's `_tool_docs()` output.
 
 ### Add a new special action
-
-Special actions are handled before the tool registry — useful for actions that need access to agent state (like `plan` or `delegate_to_agent`).
 
 Override `handle_special_action` in your agent:
 
 ```python
 def handle_special_action(self, action: str, action_input: dict) -> str | None:
     if action == "my_action":
-        # do something with self.cwd, self.model, etc.
         return "Observation: action completed"
     return super().handle_special_action(action, action_input)  # always fall through
 ```
-
-The returned string is appended as an `Observation:` message and the loop continues.
 
 ### Project layout
 
 ```
 codeassistant/
 ├── agent.py              # CLI entry point (argparse)
-├── llm.py                # Ollama HTTP client (chat + embed + list_models)
-├── config.py             # All tunables — env vars with defaults
+├── llm.py                # Ollama HTTP client (chat + embed + preload)
+├── config.py             # All tunables — env vars with defaults (Preset A)
 ├── run.sh                # Convenience wrapper (uses .venv)
+├── preload_models.sh     # Parallel model warm-up; shows RAM usage; --unload flag
 │
 ├── agents/
 │   ├── __init__.py       # REGISTRY dict + DEFAULT_AGENT
-│   ├── base.py           # BaseAgent: ReAct loop, display, delegation
-│   ├── orchestrator.py   # OrchestratorAgent: routes to sub-agents
-│   ├── coder.py          # CoderAgent: 5-phase coding workflow
-│   └── general.py        # GeneralAgent: open-ended Q&A and tasks
+│   ├── base.py           # BaseAgent: ReAct loop, streaming, display, delegation
+│   ├── orchestrator.py   # Routes via keyword pre-check + LLM call
+│   ├── planner.py        # Read-only planning; saves plan_*.md
+│   ├── coder.py          # 5-phase coding workflow
+│   ├── lint.py           # 5-phase lint/fix workflow
+│   └── general.py        # Open-ended Q&A, doc indexing, web search
 │
 ├── tools/
 │   ├── registry.py       # TOOLS list + execute_tool dispatcher
-│   ├── file_ops.py       # read/write/edit/list files
-│   ├── bash_exec.py      # safe shell execution with cwd tracking
-│   ├── code_nav.py       # grep, find, outline
+│   ├── file_ops.py       # read/write/edit/list/make/remove files
+│   ├── bash_exec.py      # Safe shell execution with cwd tracking
+│   ├── code_nav.py       # grep, find, outline, read_lines
 │   ├── git_ops.py        # git status/diff/log/commit/branch/…
 │   ├── code_tools.py     # lint, run_tests, explain/fix/generate/review
 │   ├── websearch.py      # DuckDuckGo search via ddgs
 │   ├── summarize.py      # LLM-powered text summarization
-│   ├── snippets.py       # persistent code snippet store
-│   └── rag.py            # RAG: chunk, embed, search via numpy
-│
-├── smoke-test/
-│   └── test_agents.py    # Integration smoke tests (run from project root)
+│   ├── snippets.py       # Persistent code snippet store
+│   └── rag.py            # RAG: chunk, embed (numpy), cosine search
 │
 ├── snippets/             # Saved snippet files (created at runtime)
-└── rag_store/            # RAG vector store (created at runtime)
+└── rag_store/            # RAG vector store — "docs" collection for library docs
 ```

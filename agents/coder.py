@@ -69,7 +69,11 @@ Understand the codebase before touching anything:
 - `grep_code` — find where relevant symbols are defined or used
 - `read_lines` — read specific sections of large files
 - `git_status` — see what is already changed
-- `rag_search` — query ingested documentation if available
+- `rag_search(query, collection="docs")` — **always check this first** when the task involves
+  a third-party library, framework, or API. The general agent keeps the `docs` collection
+  up to date with official documentation. Use it to verify function signatures, configuration
+  options, and breaking changes before writing any code.
+- `rag_search(query)` — also query the default collection for project-specific context
 
 ### Phase 2 — PLAN
 After exploration, emit a `plan` action:

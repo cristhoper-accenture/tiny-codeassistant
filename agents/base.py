@@ -8,7 +8,7 @@ import re
 import os
 
 import llm
-from config import DEFAULT_MODEL, AGENT_MODELS, MAX_ITERATIONS
+from config import DEFAULT_MODEL, AGENT_MODELS, MAX_ITERATIONS, STREAM_OUTPUT
 from tools.registry import TOOLS, execute_tool
 
 try:
@@ -134,12 +134,13 @@ class BaseAgent:
     label: str = "Assistant"
     border_color: str = "blue"
 
-    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0):
+    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0, streaming: bool = None):
         # None → use the per-agent model from AGENT_MODELS; explicit value → override for all agents.
         self._model_override = model
         self.model = model if model is not None else AGENT_MODELS.get(self.name, DEFAULT_MODEL)
         self.cwd = cwd or os.getcwd()
         self._depth = _depth
+        self._streaming = STREAM_OUTPUT if streaming is None else streaming
 
     # ── Subclasses override these ──────────────────────────────────────────────
 
@@ -170,10 +171,44 @@ class BaseAgent:
             return "ERROR: Delegation depth limit reached. Handle this task directly."
 
         self._print_delegation(agent_name, task)
-        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd, _depth=self._depth + 1)
+        sub = REGISTRY[agent_name](
+            model=self._model_override, cwd=self.cwd,
+            _depth=self._depth + 1, streaming=self._streaming,
+        )
         answer, new_cwd = sub.run(task)
         self.cwd = new_cwd
         return f"[Delegated to {agent_name} agent]\n{answer}"
+
+    # ── LLM call (streaming or blocking) ──────────────────────────────────────
+
+    def _call_llm(self, messages: list[dict]) -> str:
+        """Call the LLM, streaming tokens to the console when enabled."""
+        if not self._streaming:
+            return llm.chat(messages, model=self.model)
+
+        if _RICH:
+            from rich.live import Live
+            from rich.text import Text
+            parts: list[str] = []
+
+            with Live("", refresh_per_second=20, console=_console, transient=True) as live:
+                def _on_chunk(chunk: str) -> None:
+                    parts.append(chunk)
+                    live.update(Text("".join(parts), style="dim italic"))
+
+                llm.chat(messages, model=self.model, on_chunk=_on_chunk)
+            return "".join(parts)
+
+        # Plain-terminal fallback
+        parts = []
+
+        def _on_chunk_plain(chunk: str) -> None:
+            parts.append(chunk)
+            print(chunk, end="", flush=True)
+
+        llm.chat(messages, model=self.model, on_chunk=_on_chunk_plain)
+        print()
+        return "".join(parts)
 
     # ── ReAct loop ─────────────────────────────────────────────────────────────
 
@@ -186,7 +221,7 @@ class BaseAgent:
 
         _format_misses = 0
         for _ in range(MAX_ITERATIONS):
-            raw = llm.chat(messages, model=self.model)
+            raw = self._call_llm(messages)
             messages.append({"role": "assistant", "content": raw})
 
             action_obj = self._extract_action(raw)

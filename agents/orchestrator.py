@@ -25,15 +25,25 @@ except ImportError:
 
 # Descriptions shown to the routing LLM
 _AGENT_DESCRIPTIONS = {
+    "planner": (
+        "plan or design an implementation; break down a feature into steps; "
+        "produce an implementation plan, design doc, or technical spec; "
+        "analyze a codebase to decide what needs to change before writing any code"
+    ),
     "coder": (
         "write, create, edit, refactor, or delete code; "
         "implement a feature or function; fix a bug; "
-        "generate tests; run or lint code; "
-        "make changes to files in a project"
+        "generate tests; make changes to files in a project"
+    ),
+    "lint": (
+        "run linters or static analysis; find and fix lint errors, style violations, "
+        "type errors, or code-quality issues; check a file, directory, or changed files "
+        "for lint issues; enforce coding standards"
     ),
     "general": (
         "answer a question; explain a concept or piece of code; "
         "search the web; summarize text; "
+        "update, index, or refresh documentation in the RAG knowledge base; "
         "manage snippets or RAG documents; "
         "any task that does NOT require writing or modifying code files"
     ),
@@ -45,9 +55,11 @@ Agents:
 {agent_lines}
 
 Rules:
-- If the task involves writing, creating, editing, or modifying code/files → coder
-- If the task is a question, explanation, search, or general assistance → general
-- When in doubt, prefer coder for anything that sounds like software development work
+- If the task mentions "docs", "documentation", "index docs", "ingest", "rag", or "refresh docs" → general
+- If the task involves planning, designing, or writing a spec before coding → planner
+- If the task involves linting, static analysis, or fixing code quality → lint
+- If the task involves writing, editing, or implementing code files → coder
+- Otherwise → general
 
 Respond with ONLY the agent name, one word, no punctuation.
 
@@ -79,28 +91,42 @@ class OrchestratorAgent(BaseAgent):
 
     def route(self, user_input: str) -> str:
         """Return the name of the sub-agent best suited for user_input."""
+        words = set(user_input.lower().split())
+
+        # Fast pre-check: strong keyword signals bypass the LLM entirely.
+        # Ordered from most-specific to least-specific to avoid false matches.
+        _pre = self._keyword_route(words)
+        if _pre:
+            return _pre
+
+        # LLM routing for genuinely ambiguous requests.
         prompt = _build_route_prompt(user_input)
         raw = llm.chat(
             [{"role": "user", "content": prompt}],
             model=self._ROUTER_MODEL,
         ).strip().lower()
 
-        # Normalise — take the first word and match against known agents
         first_word = raw.split()[0].strip(".:,\"'") if raw else ""
         from agents import REGISTRY
         if first_word in REGISTRY and first_word != "orchestrator":
             return first_word
 
-        # Fallback heuristic if LLM returned something unexpected
-        coding_keywords = {
-            "write", "create", "implement", "fix", "edit", "refactor",
-            "generate", "build", "add", "delete", "modify", "code",
-            "function", "class", "test", "lint", "run", "debug",
-        }
-        words = set(user_input.lower().split())
-        if words & coding_keywords:
-            return "coder"
-        return "general"
+        # Final heuristic fallback if the LLM returned something unexpected.
+        return self._keyword_route(words) or "general"
+
+    @staticmethod
+    def _keyword_route(words: set[str]) -> str | None:
+        """Return an agent name if strong keywords match, else None."""
+        if words & {"docs", "documentation", "ingest", "rag", "readthedocs", "changelog"}:
+            return "general"
+        if words & {"lint", "linter", "linting", "flake8", "ruff", "pylint", "eslint", "mypy", "bandit"}:
+            return "lint"
+        if words & {"plan", "planify", "planning", "spec", "specification", "blueprint", "roadmap", "architecture"}:
+            return "planner"
+        # Questions ("what", "how", "why", "when", "where", "is", "can", "does") → general
+        if words & {"what", "how", "why", "when", "where", "explain", "describe", "summarize", "summarise"}:
+            return "general"
+        return None
 
     # ── Run ────────────────────────────────────────────────────────────────────
 
@@ -109,8 +135,8 @@ class OrchestratorAgent(BaseAgent):
         self._print_routing(agent_name, user_input)
 
         from agents import REGISTRY
-        # Propagate the raw override (None = each sub-agent uses its own configured model).
-        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd)
+        # Propagate model override and streaming preference to sub-agents.
+        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd, streaming=self._streaming)
         answer, new_cwd = sub.run(user_input)
         self.cwd = new_cwd  # persist cwd for the next turn
         return answer, new_cwd
@@ -138,7 +164,7 @@ class OrchestratorAgent(BaseAgent):
     # ── Display ────────────────────────────────────────────────────────────────
 
     def _print_routing(self, agent_name: str, user_input: str) -> None:
-        colors = {"coder": "magenta", "general": "blue"}
+        colors = {"coder": "magenta", "general": "blue", "lint": "yellow", "planner": "cyan"}
         color = colors.get(agent_name, "white")
 
         if _RICH:

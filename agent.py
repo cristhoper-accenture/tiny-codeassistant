@@ -11,6 +11,7 @@ Usage:
   python agent.py --agent coder "task"         # force a specific agent
   python agent.py --model qwen3.5:9b "task"    # override model
   python agent.py --cwd /some/project "task"   # set working directory
+  python agent.py --no-stream "task"           # disable streaming output
   python agent.py --list-agents                # show available agents
   python agent.py --list-models                # show available Ollama models
 """
@@ -63,6 +64,10 @@ def main() -> None:
         help="Override model for all agents (default: each agent uses its AGENT_MODELS config entry)",
     )
     parser.add_argument("--cwd", default=None, help="Starting working directory (default: current dir)")
+    parser.add_argument(
+        "--no-stream", action="store_true",
+        help="Disable streaming output (wait for full response before displaying)",
+    )
     parser.add_argument("--list-agents", action="store_true", help="List available agents and exit")
     parser.add_argument("--list-models", action="store_true", help="List available Ollama models and exit")
     args = parser.parse_args()
@@ -79,7 +84,8 @@ def main() -> None:
         return
 
     start_cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
-    agent = REGISTRY[args.agent](model=args.model, cwd=start_cwd)
+    streaming = False if args.no_stream else None  # None → use STREAM_OUTPUT config default
+    agent = REGISTRY[args.agent](model=args.model, cwd=start_cwd, streaming=streaming)
 
     _preload_models(args.agent, args.model)
 

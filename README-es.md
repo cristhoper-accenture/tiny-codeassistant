@@ -80,6 +80,10 @@ python agent.py --no-stream "tu tarea"
 # Wrapper de conveniencia (usa el .venv automáticamente)
 ./run.sh "tu tarea"
 
+# Llamar a run.sh desde otra carpeta de proyecto (establece --cwd automáticamente)
+/ruta/a/codeassistant/run.sh --cwd /ruta/a/mi-proyecto "corrige el bug de auth"
+cd /ruta/a/mi-proyecto && /ruta/a/codeassistant/run.sh "corrige el bug de auth"
+
 # Precargar todos los modelos en memoria de Ollama antes de iniciar
 ./preload_models.sh           # cargar defaults del Preset A
 ./preload_models.sh --unload  # liberar todos los modelos

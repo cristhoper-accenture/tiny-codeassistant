@@ -80,6 +80,10 @@ python agent.py --no-stream "your task"
 # Convenience wrapper (uses the venv automatically)
 ./run.sh "your task"
 
+# Call run.sh from a different project folder (sets --cwd automatically)
+/path/to/codeassistant/run.sh --cwd /path/to/my-project "fix the auth bug"
+cd /path/to/my-project && /path/to/codeassistant/run.sh "fix the auth bug"
+
 # Warm up all models into Ollama memory before starting
 ./preload_models.sh           # load Preset A defaults
 ./preload_models.sh --unload  # release all models

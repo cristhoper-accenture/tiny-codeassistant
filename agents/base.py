@@ -183,8 +183,27 @@ class BaseAgent:
 
     # ── LLM call (streaming or blocking) ──────────────────────────────────────
 
+    _TIMEOUT_JSON = (
+        '{"thought": "LLM call timed out — the model took too long to respond.", '
+        '"action": "final_answer", "action_input": {"response": '
+        '"The model timed out. Try increasing LLM_TIMEOUT, using a smaller model, '
+        'or breaking the task into smaller steps."}}'
+    )
+
     def _call_llm(self, messages: list[dict]) -> str:
         """Call the LLM, streaming tokens to the console when enabled."""
+        import requests as _req
+        try:
+            return self._call_llm_inner(messages)
+        except (_req.exceptions.ReadTimeout, _req.exceptions.ConnectionError) as exc:
+            if _RICH:
+                _console.print(f"[bold red]  LLM timeout:[/bold red] [dim]{exc}[/dim]")
+            else:
+                print(f"  [LLM timeout] {exc}")
+            return self._TIMEOUT_JSON
+
+    def _call_llm_inner(self, messages: list[dict]) -> str:
+        """Raw LLM call — separated so _call_llm can wrap it with timeout handling."""
         if not self._streaming:
             return llm.chat(messages, model=self.model)
 

@@ -39,7 +39,7 @@ _VERIFY_TOOLS = [
     "git_status", "git_diff", "git_commit", "git_branch",
 ]
 _LLM_TOOLS = [
-    "explain_code", "fix_code", "generate_tests", "review_code",
+    "explain_code", "fix_code", "review_code",
     "websearch", "summarize",
 ]
 
@@ -53,9 +53,9 @@ class CoderAgent(BaseAgent):
         all_docs = self._tool_docs()
         return f"""You are an expert software engineer. Your role is to write, edit, and verify code.
 
-**Scope**: write, edit, refactor, and verify source-code files. Fix logic/runtime bugs. Generate tests.
-**Out of scope**: answering general questions, explaining concepts, producing plan documents, fixing lint style issues.
-If the task is purely a question, documentation lookup, or a linting-only job, say so in final_answer.
+**Scope**: write, edit, refactor, and verify source-code files. Fix logic/runtime bugs.
+**Out of scope**: writing test files (→ tester agent), answering general questions, explaining concepts, producing plan documents, fixing lint style issues.
+If the task is purely a question, documentation lookup, a linting-only job, or test authoring, say so in final_answer.
 
 ## Current working directory
 `{self.cwd}`
@@ -106,7 +106,7 @@ Execute the plan:
 ### Phase 4 — VERIFY
 After all changes:
 - `lint` every file you created or modified
-- `run_tests` if a test suite exists
+- `run_tests` to check that existing tests still pass (do not write new test files — that is the tester agent's job)
 - Fix any errors before reporting
 - `git_status` to confirm the change set
 

@@ -38,10 +38,24 @@ _AGENT_DESCRIPTIONS = {
         "Examples: 'add rate limiting', 'fix the login crash', 'refactor auth.py', 'write tests for utils'."
     ),
     "planner": (
-        "ONLY for producing a written plan, spec, or design document — no code is written. "
-        "Use when the user wants to think through an implementation before starting. "
-        "Examples: 'plan the OAuth2 integration', 'create a design spec for the new API', "
-        "'break down the migration into steps'."
+        "ONLY for producing high-level architecture documents, design specs, risk analyses, and "
+        "interface definitions — no code is written. Use when the user wants to design the "
+        "architecture or think through trade-offs before implementation. "
+        "Examples: 'design the OAuth2 architecture', 'create a technical spec for the new API', "
+        "'what is the best data model for this feature'."
+    ),
+    "tester": (
+        "ONLY for writing test files and running the test suite. Asks the user to confirm results "
+        "before finishing — if user says no, assumes the user will fix it. "
+        "Examples: 'write tests for auth.py', 'add unit tests for the parser', "
+        "'generate pytest tests for utils', 'create a test suite for the API endpoints'."
+    ),
+    "breakdown": (
+        "ONLY for decomposing a task into an ordered, numbered, atomic step-by-step checklist. "
+        "Use when the user knows WHAT to build and wants HOW to execute it step by step. "
+        "No architecture design, no code written. "
+        "Examples: 'break down the migration into steps', 'give me a checklist to add JWT auth', "
+        "'list the steps to deploy this to AWS', 'create a task sequence for the refactor'."
     ),
     "general": (
         "For everything that does NOT require modifying source code: answer questions, "
@@ -54,15 +68,17 @@ _AGENT_DESCRIPTIONS = {
 
 _ROUTE_PROMPT = """You are a task router. Pick one agent using this priority order — stop at the first match:
 
-1. lint    — task is ONLY about running a linter and fixing style/formatting (no logic changes)
-2. coder   — task requires writing or editing source code files right now
-3. planner — task requires a written plan or design document (no code written yet)
-4. general — everything else: questions, explanations, web search, doc indexing, snippets
+1. lint      — task is ONLY about running a linter and fixing style/formatting (no logic changes)
+2. tester    — task is about writing test files or running the test suite
+3. coder     — task requires writing or editing source code files right now
+4. planner   — task requires high-level architecture design, a spec, or trade-off analysis (no code)
+5. breakdown — task requires an ordered step-by-step checklist for how to execute something (no code)
+6. general   — everything else: questions, explanations, web search, doc indexing, snippets
 
 Agent definitions:
 {agent_lines}
 
-Respond with ONLY the agent name (lint / coder / planner / general), one word, no punctuation.
+Respond with ONLY the agent name (lint / tester / coder / planner / breakdown / general), one word, no punctuation.
 
 User request: {request}
 Agent:"""
@@ -92,11 +108,12 @@ class OrchestratorAgent(BaseAgent):
 
     def route(self, user_input: str) -> str:
         """Return the name of the sub-agent best suited for user_input."""
-        words = set(user_input.lower().split())
+        text  = user_input.lower()
+        words = set(text.split())
 
         # Fast pre-check: strong keyword signals bypass the LLM entirely.
         # Ordered from most-specific to least-specific to avoid false matches.
-        _pre = self._keyword_route(words)
+        _pre = self._keyword_route(words, text)
         if _pre:
             return _pre
 
@@ -113,26 +130,49 @@ class OrchestratorAgent(BaseAgent):
             return first_word
 
         # Final heuristic fallback if the LLM returned something unexpected.
-        return self._keyword_route(words) or "general"
+        return self._keyword_route(words, text) or "general"
 
     @staticmethod
-    def _keyword_route(words: set[str]) -> str | None:
+    def _keyword_route(words: set[str], text: str = "") -> str | None:
         """Return an agent name if strong, unambiguous keywords match, else None.
 
-        Priority: lint > coder > planner > general.
-        Only signals that are unambiguously tied to ONE agent are listed here.
+        Priority: lint > tester > breakdown > coder > planner > general.
+        `text` is the lowercased original input — used for reliable multi-word phrase matching.
         """
         # Lint — linter tool names are always unambiguous
         if words & {"lint", "linter", "linting", "flake8", "ruff", "pylint",
                     "eslint", "mypy", "bandit", "pycodestyle", "pyflakes"}:
             return "lint"
 
+        # Tester — checked before coder so "write tests" beats the weak "write" coder signal
+        _test_tool_words = {"pytest", "unittest", "jest", "mocha", "vitest"}
+        _test_phrases = (
+            "write tests", "add tests", "create tests", "generate tests",
+            "unit tests", "integration tests", "test suite", "test file",
+            "write test", "add test", "create test",
+        )
+        if words & _test_tool_words or any(p in text for p in _test_phrases):
+            return "tester"
+
+        # Breakdown — checked before coder so "sequence for the auth refactor" beats "refactor"
+        _breakdown_words = {
+            "breakdown", "checklist", "steps", "sequence",
+            "roadmap", "milestones", "decompose", "decomposition",
+            "tasklist", "sprint", "iterations",
+        }
+        _breakdown_phrases = (
+            "break down", "step by step", "step-by-step", "task sequence", "task list",
+        )
+        if words & _breakdown_words or any(p in text for p in _breakdown_phrases):
+            return "breakdown"
+
         # Coder — action verbs that always mean "write code now"
         if words & {"implement", "refactor", "rewrite", "scaffold"}:
             return "coder"
 
-        # Planner — explicit planning intent (checked before weak "create" signal)
-        if words & {"plan", "planify", "spec", "specification", "blueprint"}:
+        # Planner — high-level design/architecture intent (checked before weak "create" signal)
+        if words & {"plan", "planify", "spec", "specification", "blueprint",
+                    "architecture", "design", "tradeoff", "trade-off"}:
             return "planner"
 
         # "create/build/write/add" are weak coder signals — only use them when there
@@ -185,7 +225,7 @@ class OrchestratorAgent(BaseAgent):
     # ── Display ────────────────────────────────────────────────────────────────
 
     def _print_routing(self, agent_name: str, user_input: str) -> None:
-        colors = {"coder": "magenta", "general": "blue", "lint": "yellow", "planner": "cyan"}
+        colors = {"coder": "magenta", "general": "blue", "lint": "yellow", "planner": "cyan", "breakdown": "green", "tester": "bright_blue"}
         color = colors.get(agent_name, "white")
 
         if _RICH:

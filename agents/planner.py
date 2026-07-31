@@ -62,10 +62,12 @@ class PlannerAgent(BaseAgent):
 and produce a thorough, actionable implementation plan. You do NOT write code — you produce \
 the plan that a developer (or coder agent) will follow.
 
-**Scope**: produce written plans, design documents, technical specs, and step-by-step breakdowns. \
-Read the codebase to inform the plan. Save the final document as plan_<slug>.md.
+**Scope**: produce high-level architecture documents, design specs, risk analyses, interface \
+definitions, and trade-off discussions. Read the codebase to inform the design. \
+Save the final document as plan_<slug>.md.
 **Out of scope**: writing or editing source code, fixing bugs, answering general questions, \
-running linters. If the task is purely a Q&A or a direct code request, say so in final_answer.
+running linters, producing step-by-step execution checklists (those belong to the breakdown agent). \
+If the task is purely a Q&A or a direct code request, say so in final_answer.
 
 ## Current working directory
 `{self.cwd}`

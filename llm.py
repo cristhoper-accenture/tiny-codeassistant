@@ -3,10 +3,8 @@
 import json
 import os
 import requests
-from config import OLLAMA_BASE_URL, DEFAULT_MODEL
+from config import OLLAMA_BASE_URL, DEFAULT_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS
 
-# Larger models (9b+) can take several minutes to generate long code blocks.
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "300"))
 _CONNECT_TIMEOUT = 10  # seconds to establish TCP connection to Ollama
 
 
@@ -27,7 +25,7 @@ def chat(
         "model": model,
         "messages": messages,
         "stream": stream,
-        "options": {"temperature": 0.2},
+        "options": {"temperature": 0.2, "num_predict": LLM_MAX_TOKENS},
     }
 
     if stream:

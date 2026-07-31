@@ -232,11 +232,17 @@ class BaseAgent:
         finally:
             self._monitor.stop()
 
+    # Max chars kept in message history for a single assistant turn or tool result.
+    # Prevents context-window overflow when small models generate very long repetitive text.
+    _MAX_HISTORY_CHARS = 8000
+
     def _run_loop(self, messages: list[dict]) -> tuple[str, str]:
         _format_misses = 0
         for _ in range(MAX_ITERATIONS):
             raw = self._call_llm(messages)
-            messages.append({"role": "assistant", "content": raw})
+            # Truncate before storing — prevents runaway repetition from filling the context window.
+            history_raw = raw if len(raw) <= self._MAX_HISTORY_CHARS else raw[:self._MAX_HISTORY_CHARS] + "\n[truncated]"
+            messages.append({"role": "assistant", "content": history_raw})
 
             action_obj = self._extract_action(raw)
 
@@ -278,8 +284,9 @@ class BaseAgent:
             # Let subclass handle special actions first
             special_result = self.handle_special_action(action, action_input)
             if special_result is not None:
+                history_special = special_result if len(special_result) <= self._MAX_HISTORY_CHARS else special_result[:self._MAX_HISTORY_CHARS] + "\n[truncated]"
                 messages[0] = {"role": "system", "content": self.build_system_prompt()}
-                messages.append({"role": "user", "content": f"Observation: {special_result}"})
+                messages.append({"role": "user", "content": f"Observation: {history_special}"})
                 continue
 
             # Standard tool dispatch
@@ -287,8 +294,9 @@ class BaseAgent:
             result, self.cwd = execute_tool(action, action_input, self.cwd)
             self._print_tool_result(result)
 
+            history_result = result if len(result) <= self._MAX_HISTORY_CHARS else result[:self._MAX_HISTORY_CHARS] + "\n[truncated — use read_lines for more]"
             messages[0] = {"role": "system", "content": self.build_system_prompt()}
-            messages.append({"role": "user", "content": f"Observation: {result}"})
+            messages.append({"role": "user", "content": f"Observation: {history_result}"})
 
         return "Max iterations reached without a final answer.", self.cwd
 

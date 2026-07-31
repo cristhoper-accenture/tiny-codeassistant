@@ -50,7 +50,7 @@ LLM output streams token-by-token by default in both REPL and single-shot modes.
     planner=phi4-mini:3.8b, general=phi4-mini:3.8b
   (override with ORCHESTRATOR_MODEL, CODER_MODEL, LINT_MODEL, PLANNER_MODEL, GENERAL_MODEL env vars)
 - AGENT_MAX_ITER=15 (max ReAct iterations per run)
-- LLM_TIMEOUT=300 (seconds, increase for large models)
+- LLM_TIMEOUT=600 (seconds; 7b+ models need 5-10 min on CPU for complex first responses)
 - STREAM_OUTPUT=true (stream tokens in real time; set to false to disable)
 - BASH_TIMEOUT=60 (seconds per shell command; also used by lint runner and git ops)
 - RAG_FETCH_TIMEOUT=30 (seconds for rag_add_url HTTP fetch)

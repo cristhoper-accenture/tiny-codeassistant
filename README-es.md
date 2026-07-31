@@ -107,7 +107,7 @@ Todos los parámetros pueden configurarse sin tocar el código:
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Preguntas, búsqueda web, indexado de docs |
 | `STREAM_OUTPUT` | `true` | Transmitir tokens en tiempo real (`false` para desactivar) |
 | `AGENT_MAX_ITER` | `15` | Máximo de iteraciones ReAct por consulta |
-| `LLM_TIMEOUT` | `300` | Segundos antes de que expire una llamada a Ollama |
+| `LLM_TIMEOUT` | `600` | Segundos antes de que expire una llamada a Ollama (modelos 7b+ necesitan 5-10 min en CPU) |
 | `BASH_TIMEOUT` | `60` | Segundos antes de que se cancele un comando de shell |
 | `RAG_FETCH_TIMEOUT` | `30` | Segundos antes de que se cancele una descarga de URL (rag_add_url) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | URL base de la API de Ollama |

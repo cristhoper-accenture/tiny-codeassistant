@@ -3,7 +3,7 @@ import os
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("AGENT_MODEL", "qwen2.5-coder:7b")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITER", "15"))
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "300"))  # seconds; increase for large models
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "600"))  # seconds; 7b+ models need 5-10 min on CPU
 SNIPPET_DIR = os.path.join(os.path.dirname(__file__), "snippets")
 BASH_TIMEOUT = int(os.getenv("BASH_TIMEOUT", "60"))
 RAG_FETCH_TIMEOUT = int(os.getenv("RAG_FETCH_TIMEOUT", "30"))

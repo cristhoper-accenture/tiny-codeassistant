@@ -107,7 +107,7 @@ All tunables can be set without touching code:
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Q&A, web search, doc indexing |
 | `STREAM_OUTPUT` | `true` | Stream tokens in real time (`false` to disable) |
 | `AGENT_MAX_ITER` | `15` | Max ReAct iterations per query |
-| `LLM_TIMEOUT` | `300` | Seconds before an Ollama call times out |
+| `LLM_TIMEOUT` | `600` | Seconds before an Ollama call times out (7b+ models need 5-10 min on CPU) |
 | `BASH_TIMEOUT` | `60` | Seconds before a shell command is killed |
 | `RAG_FETCH_TIMEOUT` | `30` | Seconds before a URL fetch (rag_add_url) is aborted |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API base URL |

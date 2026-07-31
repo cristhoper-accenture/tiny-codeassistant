@@ -42,10 +42,30 @@ class PlannerAgent(BaseAgent):
     label = "Planner"
     border_color = "cyan"
 
+    def handle_special_action(self, action: str, action_input: dict) -> str | None:
+        # Guard: only allow writing plan documents (plan_*.md).
+        # Any attempt to write source code is rejected and redirected to the coder agent.
+        if action == "write_file":
+            path = action_input.get("path", "")
+            import os
+            fname = os.path.basename(path)
+            if not (fname.startswith("plan_") and fname.endswith(".md")):
+                return (
+                    f"BLOCKED: planner may only write plan_*.md files, not '{fname}'. "
+                    "Write your plan as plan_<slug>.md, or use final_answer to return it inline. "
+                    "Source code must be written by the coder agent."
+                )
+        return super().handle_special_action(action, action_input)
+
     def build_system_prompt(self) -> str:
         return f"""You are a senior software architect. Your role is to deeply understand a task \
 and produce a thorough, actionable implementation plan. You do NOT write code — you produce \
 the plan that a developer (or coder agent) will follow.
+
+**Scope**: produce written plans, design documents, technical specs, and step-by-step breakdowns. \
+Read the codebase to inform the plan. Save the final document as plan_<slug>.md.
+**Out of scope**: writing or editing source code, fixing bugs, answering general questions, \
+running linters. If the task is purely a Q&A or a direct code request, say so in final_answer.
 
 ## Current working directory
 `{self.cwd}`

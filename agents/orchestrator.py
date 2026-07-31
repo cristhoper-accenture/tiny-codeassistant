@@ -23,45 +23,46 @@ try:
 except ImportError:
     _RICH = False
 
-# Descriptions shown to the routing LLM
+# Each description is exclusive — no overlap with the others.
+# Phrased as "use ONLY when" so the routing LLM can apply the decision tree.
 _AGENT_DESCRIPTIONS = {
-    "planner": (
-        "plan or design an implementation; break down a feature into steps; "
-        "produce an implementation plan, design doc, or technical spec; "
-        "analyze a codebase to decide what needs to change before writing any code"
+    "lint": (
+        "ONLY for fixing lint/style/formatting errors produced by a linter (ruff, flake8, "
+        "pylint, mypy, eslint). Must NOT change business logic. "
+        "Examples: 'fix ruff errors', 'clean up pylint warnings', 'enforce PEP8 in src/'."
     ),
     "coder": (
-        "write, create, edit, refactor, or delete code; "
-        "implement a feature or function; fix a bug; "
-        "generate tests; make changes to files in a project"
+        "ONLY for writing, editing, refactoring, or deleting source code files right now. "
+        "Use when actual file changes are needed: add a feature, fix a logic/runtime bug, "
+        "generate tests, update an existing function. "
+        "Examples: 'add rate limiting', 'fix the login crash', 'refactor auth.py', 'write tests for utils'."
     ),
-    "lint": (
-        "run linters or static analysis; find and fix lint errors, style violations, "
-        "type errors, or code-quality issues; check a file, directory, or changed files "
-        "for lint issues; enforce coding standards"
+    "planner": (
+        "ONLY for producing a written plan, spec, or design document — no code is written. "
+        "Use when the user wants to think through an implementation before starting. "
+        "Examples: 'plan the OAuth2 integration', 'create a design spec for the new API', "
+        "'break down the migration into steps'."
     ),
     "general": (
-        "answer a question; explain a concept or piece of code; "
-        "search the web; summarize text; "
-        "update, index, or refresh documentation in the RAG knowledge base; "
-        "manage snippets or RAG documents; "
-        "any task that does NOT require writing or modifying code files"
+        "For everything that does NOT require modifying source code: answer questions, "
+        "explain concepts or code, search the web, summarize text, index or refresh "
+        "library documentation in the RAG knowledge base, manage snippets. "
+        "Examples: 'what is a decorator?', 'explain this function', 'search httpx docs', "
+        "'update the FastAPI docs in the knowledge base'."
     ),
 }
 
-_ROUTE_PROMPT = """You are a task router. Given a user request, choose the most appropriate agent.
+_ROUTE_PROMPT = """You are a task router. Pick one agent using this priority order — stop at the first match:
 
-Agents:
+1. lint    — task is ONLY about running a linter and fixing style/formatting (no logic changes)
+2. coder   — task requires writing or editing source code files right now
+3. planner — task requires a written plan or design document (no code written yet)
+4. general — everything else: questions, explanations, web search, doc indexing, snippets
+
+Agent definitions:
 {agent_lines}
 
-Rules:
-- If the task mentions "docs", "documentation", "index docs", "ingest", "rag", or "refresh docs" → general
-- If the task involves planning, designing, or writing a spec before coding → planner
-- If the task involves linting, static analysis, or fixing code quality → lint
-- If the task involves writing, editing, or implementing code files → coder
-- Otherwise → general
-
-Respond with ONLY the agent name, one word, no punctuation.
+Respond with ONLY the agent name (lint / coder / planner / general), one word, no punctuation.
 
 User request: {request}
 Agent:"""
@@ -116,16 +117,36 @@ class OrchestratorAgent(BaseAgent):
 
     @staticmethod
     def _keyword_route(words: set[str]) -> str | None:
-        """Return an agent name if strong keywords match, else None."""
+        """Return an agent name if strong, unambiguous keywords match, else None.
+
+        Priority: lint > coder > planner > general.
+        Only signals that are unambiguously tied to ONE agent are listed here.
+        """
+        # Lint — linter tool names are always unambiguous
+        if words & {"lint", "linter", "linting", "flake8", "ruff", "pylint",
+                    "eslint", "mypy", "bandit", "pycodestyle", "pyflakes"}:
+            return "lint"
+
+        # Coder — action verbs that always mean "write code now"
+        if words & {"implement", "refactor", "rewrite", "scaffold"}:
+            return "coder"
+
+        # Planner — explicit planning intent (checked before weak "create" signal)
+        if words & {"plan", "planify", "spec", "specification", "blueprint"}:
+            return "planner"
+
+        # "create/build/write/add" are weak coder signals — only use them when there
+        # are no planner or doc-management keywords that would override the intent.
+        _plan_words = {"plan", "spec", "specification", "blueprint", "document", "doc", "docs"}
+        if words & {"create", "build", "write", "add", "generate"} and not words & _plan_words:
+            return "coder"
+
+        # General — doc-indexing signals and pure question words
         if words & {"docs", "documentation", "ingest", "rag", "readthedocs", "changelog"}:
             return "general"
-        if words & {"lint", "linter", "linting", "flake8", "ruff", "pylint", "eslint", "mypy", "bandit"}:
-            return "lint"
-        if words & {"plan", "planify", "planning", "spec", "specification", "blueprint", "roadmap", "architecture"}:
-            return "planner"
-        # Questions ("what", "how", "why", "when", "where", "is", "can", "does") → general
-        if words & {"what", "how", "why", "when", "where", "explain", "describe", "summarize", "summarise"}:
+        if words & {"what", "why", "when", "where", "explain", "describe", "summarize", "summarise"}:
             return "general"
+
         return None
 
     # ── Run ────────────────────────────────────────────────────────────────────

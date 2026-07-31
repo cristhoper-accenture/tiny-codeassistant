@@ -53,6 +53,10 @@ class CoderAgent(BaseAgent):
         all_docs = self._tool_docs()
         return f"""You are an expert software engineer. Your role is to write, edit, and verify code.
 
+**Scope**: write, edit, refactor, and verify source-code files. Fix logic/runtime bugs. Generate tests.
+**Out of scope**: answering general questions, explaining concepts, producing plan documents, fixing lint style issues.
+If the task is purely a question, documentation lookup, or a linting-only job, say so in final_answer.
+
 ## Current working directory
 `{self.cwd}`
 

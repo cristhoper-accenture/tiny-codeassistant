@@ -10,6 +10,7 @@ import os
 import llm
 from config import DEFAULT_MODEL, AGENT_MODELS, MAX_ITERATIONS, STREAM_OUTPUT
 from tools.registry import TOOLS, execute_tool
+from tools.sysmon import SystemMonitor
 
 try:
     from rich.console import Console
@@ -141,6 +142,7 @@ class BaseAgent:
         self.cwd = cwd or os.getcwd()
         self._depth = _depth
         self._streaming = STREAM_OUTPUT if streaming is None else streaming
+        self._monitor = SystemMonitor()
 
     # ── Subclasses override these ──────────────────────────────────────────────
 
@@ -191,10 +193,15 @@ class BaseAgent:
             from rich.text import Text
             parts: list[str] = []
 
-            with Live("", refresh_per_second=20, console=_console, transient=True) as live:
+            with Live("", refresh_per_second=10, console=_console, transient=True) as live:
                 def _on_chunk(chunk: str) -> None:
                     parts.append(chunk)
-                    live.update(Text("".join(parts), style="dim italic"))
+                    t = Text()
+                    t.append("".join(parts), style="dim italic")
+                    stats = self._monitor.stats_text()
+                    if stats:
+                        t.append(f"  [{stats}]", style="dim cyan")
+                    live.update(t)
 
                 llm.chat(messages, model=self.model, on_chunk=_on_chunk)
             return "".join(parts)
@@ -219,6 +226,13 @@ class BaseAgent:
             {"role": "user", "content": user_input},
         ]
 
+        self._monitor.start()
+        try:
+            return self._run_loop(messages)
+        finally:
+            self._monitor.stop()
+
+    def _run_loop(self, messages: list[dict]) -> tuple[str, str]:
         _format_misses = 0
         for _ in range(MAX_ITERATIONS):
             raw = self._call_llm(messages)
@@ -338,24 +352,35 @@ class BaseAgent:
             print(f"  Thought: {thought}")
 
     def _print_tool_call(self, action: str, params: dict) -> None:
+        stats = self._monitor.stats_text()
         if _RICH:
+            title = "[yellow]Tool[/yellow]"
+            if stats:
+                title += f"  [dim]{stats}[/dim]"
             _console.print(Panel(
                 f"[bold cyan]{action}[/bold cyan]\n{json.dumps(params, indent=2)}",
-                title="[yellow]Tool[/yellow]", border_style="yellow",
+                title=title, border_style="yellow",
             ))
         else:
-            print(f"\n[Tool] {action}({json.dumps(params)})")
+            stats_str = f"  [{stats}]" if stats else ""
+            print(f"\n[Tool] {action}({json.dumps(params)}){stats_str}")
 
     def _print_tool_result(self, result: str) -> None:
         preview = result[:500] + ("…" if len(result) > 500 else "")
+        stats = self._monitor.stats_text()
         if _RICH:
             from rich.markup import escape
+            footer = f"[dim]cwd: {self._cwd_display()}"
+            if stats:
+                footer += f"  ·  {stats}"
+            footer += "[/dim]"
             _console.print(Panel(
-                f"{escape(preview)}\n[dim]cwd: {self._cwd_display()}[/dim]",
+                f"{escape(preview)}\n{footer}",
                 title="[green]Result[/green]", border_style="green",
             ))
         else:
-            print(f"[Result] {preview}\n[cwd: {self.cwd}]")
+            stats_str = f"  [{stats}]" if stats else ""
+            print(f"[Result] {preview}\n[cwd: {self.cwd}]{stats_str}")
 
     def _print_format_warning(self, raw: str) -> None:
         preview = raw[:120] + ("…" if len(raw) > 120 else "")

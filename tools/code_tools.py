@@ -112,8 +112,9 @@ def _ext(path: str) -> str:
 
 
 def _run(cmd: list[str], cwd: str) -> str:
+    from config import BASH_TIMEOUT
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=BASH_TIMEOUT)
         out = (r.stdout + r.stderr).strip()
         return out or f"Exit code: {r.returncode} (no output)"
     except FileNotFoundError:

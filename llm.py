@@ -7,6 +7,7 @@ from config import OLLAMA_BASE_URL, DEFAULT_MODEL
 
 # Larger models (9b+) can take several minutes to generate long code blocks.
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "300"))
+_CONNECT_TIMEOUT = 10  # seconds to establish TCP connection to Ollama
 
 
 def chat(
@@ -31,7 +32,7 @@ def chat(
 
     if stream:
         parts: list[str] = []
-        with requests.post(url, json=payload, stream=True, timeout=LLM_TIMEOUT) as resp:
+        with requests.post(url, json=payload, stream=True, timeout=(_CONNECT_TIMEOUT, LLM_TIMEOUT)) as resp:
             resp.raise_for_status()
             for raw_line in resp.iter_lines():
                 if not raw_line:
@@ -45,14 +46,14 @@ def chat(
                     break
         return "".join(parts)
 
-    resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
+    resp = requests.post(url, json=payload, timeout=(_CONNECT_TIMEOUT, LLM_TIMEOUT))
     resp.raise_for_status()
     return resp.json()["message"]["content"]
 
 
 def embed(text: str, model: str = "qwen3-embedding:4b") -> list[float]:
     url = f"{OLLAMA_BASE_URL}/api/embeddings"
-    resp = requests.post(url, json={"model": model, "prompt": text}, timeout=60)
+    resp = requests.post(url, json={"model": model, "prompt": text}, timeout=(_CONNECT_TIMEOUT, LLM_TIMEOUT))
     resp.raise_for_status()
     return resp.json()["embedding"]
 
@@ -67,7 +68,7 @@ def preload(model: str = DEFAULT_MODEL) -> None:
     resp = requests.post(
         url,
         json={"model": model, "keep_alive": -1},
-        timeout=LLM_TIMEOUT,
+        timeout=(_CONNECT_TIMEOUT, LLM_TIMEOUT),
     )
     resp.raise_for_status()
 

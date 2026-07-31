@@ -5,6 +5,7 @@ All commands run in the given cwd (the git repo root or any subdirectory).
 
 import subprocess
 import os
+from config import BASH_TIMEOUT
 
 
 def _git(args: list[str], cwd: str) -> tuple[str, str, int]:
@@ -13,7 +14,7 @@ def _git(args: list[str], cwd: str) -> tuple[str, str, int]:
         capture_output=True,
         text=True,
         cwd=cwd,
-        timeout=30,
+        timeout=BASH_TIMEOUT,
     )
     return result.stdout, result.stderr, result.returncode
 

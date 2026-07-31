@@ -108,7 +108,8 @@ All tunables can be set without touching code:
 | `STREAM_OUTPUT` | `true` | Stream tokens in real time (`false` to disable) |
 | `AGENT_MAX_ITER` | `15` | Max ReAct iterations per query |
 | `LLM_TIMEOUT` | `300` | Seconds before an Ollama call times out |
-| `BASH_TIMEOUT` | `30` | Seconds before a shell command is killed |
+| `BASH_TIMEOUT` | `60` | Seconds before a shell command is killed |
+| `RAG_FETCH_TIMEOUT` | `30` | Seconds before a URL fetch (rag_add_url) is aborted |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API base URL |
 | `EMBED_MODEL` | `qwen3-embedding:4b` | Embedding model for RAG |
 | `RAG_CHUNK_SIZE` | `600` | Token size for RAG document chunks |

@@ -131,8 +131,9 @@ class _TextExtractor(html.parser.HTMLParser):
 
 
 def _fetch_url(url: str) -> str:
+    from config import RAG_FETCH_TIMEOUT
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=RAG_FETCH_TIMEOUT) as resp:
         raw = resp.read().decode(resp.headers.get_content_charset("utf-8"), errors="replace")
     parser = _TextExtractor()
     parser.feed(raw)

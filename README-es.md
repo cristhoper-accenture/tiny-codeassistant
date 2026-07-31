@@ -108,7 +108,8 @@ Todos los parámetros pueden configurarse sin tocar el código:
 | `STREAM_OUTPUT` | `true` | Transmitir tokens en tiempo real (`false` para desactivar) |
 | `AGENT_MAX_ITER` | `15` | Máximo de iteraciones ReAct por consulta |
 | `LLM_TIMEOUT` | `300` | Segundos antes de que expire una llamada a Ollama |
-| `BASH_TIMEOUT` | `30` | Segundos antes de que se cancele un comando de shell |
+| `BASH_TIMEOUT` | `60` | Segundos antes de que se cancele un comando de shell |
+| `RAG_FETCH_TIMEOUT` | `30` | Segundos antes de que se cancele una descarga de URL (rag_add_url) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | URL base de la API de Ollama |
 | `EMBED_MODEL` | `qwen3-embedding:4b` | Modelo de embeddings para RAG |
 | `RAG_CHUNK_SIZE` | `600` | Tamaño de chunk para documentos RAG |

@@ -1,0 +1,207 @@
+================================================================================
+  EXAMPLE PROMPTS — Code Assistant
+  Application stacks: Python+Dash | React+Flask | React+Node | MicroPython ESP32
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  PYTHON + DASH
+────────────────────────────────────────────────────────────────────────────────
+
+-- New projects --
+
+Create a Dash app that reads a CSV file and shows an interactive bar chart with
+a dropdown to select the column to plot on the Y axis.
+
+Build a real-time dashboard in Dash that polls a local SQLite database every
+5 seconds and displays a line chart of the last 60 data points.
+
+Create a multi-page Dash app with a sidebar navigation. Page 1 shows a KPI
+summary (cards with total, average, max). Page 2 shows a scatter plot with
+color-coded categories. Use dash-bootstrap-components for layout.
+
+-- Features --
+
+Add a date-range picker to the existing Dash app so the charts filter
+automatically when the user changes the date range.
+
+Add export-to-CSV and export-to-PNG buttons to every chart in the dashboard.
+
+Implement a DataTable in Dash with server-side pagination, sorting, and
+filtering for a table with 100 000 rows backed by a SQLite database.
+
+Add user authentication to the Dash app using flask-login so only logged-in
+users can see the dashboard.
+
+-- Bugs / refactors --
+
+The Dash callback throws a PreventUpdate exception on the first load before
+any data is selected. Fix it so the chart renders a default view on startup.
+
+Refactor all global pandas DataFrames in the Dash app to be loaded inside
+a dcc.Store so the app is safe for concurrent users.
+
+The Dash app re-fetches the entire dataset on every callback. Cache the data
+with functools.lru_cache so it is only loaded once per process restart.
+
+-- Tests --
+
+Write pytest tests for all Dash callbacks using dash.testing and a headless
+browser. Cover the happy path and the empty-data edge case.
+
+────────────────────────────────────────────────────────────────────────────────
+  REACT + FLASK
+────────────────────────────────────────────────────────────────────────────────
+
+-- New projects --
+
+Scaffold a project with a Flask REST API backend (blueprints, SQLAlchemy,
+flask-migrate) and a React frontend (Vite, React Router, Axios). Include a
+proxy config so the React dev server forwards /api calls to Flask.
+
+Create a Flask API with JWT authentication (flask-jwt-extended) and a React
+login page that stores the token in memory (not localStorage) and attaches it
+to every request via Axios interceptors.
+
+Build a full-stack note-taking app: Flask API with CRUD endpoints for notes
+stored in PostgreSQL, React frontend with a list view and a markdown editor.
+
+-- Features --
+
+Add file upload to the Flask API using flask-uploads and display the uploaded
+images in the React frontend with lazy loading.
+
+Implement WebSocket support with flask-socketio so the React frontend receives
+live notifications when another user creates or updates a record.
+
+Add pagination to the Flask /api/items endpoint and wire it up to a React
+component that renders a "Load more" button.
+
+Add a global error boundary in React that catches API errors and shows a toast
+notification using react-hot-toast.
+
+-- Bugs / refactors --
+
+The Flask API returns 500 when the request body is missing a required field.
+Add input validation with marshmallow and return 400 with a descriptive message.
+
+The React frontend makes duplicate API calls on every render. Fix the useEffect
+dependencies so each endpoint is called only once per route change.
+
+CORS errors appear when the React dev server calls the Flask API. Configure
+flask-cors to allow requests from localhost:5173 in development only.
+
+-- Tests --
+
+Write pytest tests for all Flask API endpoints using the Flask test client.
+Cover authentication, happy path, and validation-error responses.
+
+Write React component tests with Vitest and Testing Library for the login form.
+Mock the Axios calls and verify the token is stored after a successful login.
+
+────────────────────────────────────────────────────────────────────────────────
+  REACT + NODE (Express)
+────────────────────────────────────────────────────────────────────────────────
+
+-- New projects --
+
+Scaffold a monorepo with an Express API (TypeScript, Zod validation, Prisma +
+PostgreSQL) and a React frontend (Vite, TypeScript, React Query). Add a shared
+types package so the API response types are reused in the frontend.
+
+Create a REST API in Express with JWT authentication using jsonwebtoken and
+bcrypt for password hashing. Add refresh-token rotation and a /logout endpoint
+that invalidates the token.
+
+Build a real-time chat app: Express + Socket.IO backend, React + socket.io-client
+frontend. Support multiple rooms, message history stored in MongoDB, and
+a typing indicator.
+
+-- Features --
+
+Add rate limiting to the Express API using express-rate-limit. Limit each IP to
+100 requests per 15 minutes and return 429 with a Retry-After header.
+
+Implement file upload in Express with multer, store files in S3-compatible
+storage (MinIO locally), and return a signed URL to the React frontend.
+
+Add optimistic updates to the React frontend so the UI updates immediately
+when the user submits a form, then rolls back if the API call fails.
+
+Implement infinite scroll in the React list view using React Query's
+useInfiniteQuery and an Express cursor-based pagination endpoint.
+
+-- Bugs / refactors --
+
+The Express server crashes when an async route handler throws. Wrap all async
+handlers with a utility that forwards errors to express error middleware.
+
+The React app re-renders the entire list when any item changes. Wrap list items
+in React.memo and fix the parent component to avoid creating new object
+references on every render.
+
+The Prisma queries in the Express API run sequentially inside a loop. Rewrite
+them to use Promise.all so they run in parallel.
+
+-- Tests --
+
+Write Supertest integration tests for all Express endpoints. Use an in-memory
+SQLite Prisma datasource so tests are isolated and do not require a running DB.
+
+Write React component tests with Vitest and Testing Library. Mock react-query
+responses and verify loading, error, and success states for the main list page.
+
+────────────────────────────────────────────────────────────────────────────────
+  MICROPYTHON — ESP32
+────────────────────────────────────────────────────────────────────────────────
+
+-- New projects --
+
+Write a MicroPython script for an ESP32 that connects to Wi-Fi, reads
+temperature and humidity from a DHT22 sensor every 30 seconds, and publishes
+the readings to an MQTT broker as JSON.
+
+Create a MicroPython web server on ESP32 using the built-in socket module that
+serves a small HTML dashboard showing the current ADC reading from a light
+sensor, auto-refreshing every 5 seconds.
+
+Build a MicroPython data logger for ESP32: read an analog sensor every minute,
+store readings in a CSV file on the onboard flash (uos), and expose a /download
+HTTP endpoint to retrieve the file.
+
+-- Features --
+
+Add deep-sleep support to the MicroPython sensor script so the ESP32 wakes
+every 60 seconds, reads the sensor, publishes to MQTT, then goes back to sleep
+to save battery.
+
+Implement OTA (over-the-air) firmware update for the ESP32: poll an HTTP server
+for a new version hash, download the binary if it differs, and write it to the
+OTA partition using the esp32 module.
+
+Add a captive-portal Wi-Fi setup flow: if no credentials are saved the ESP32
+starts its own access point, serves a config page where the user enters SSID
+and password, saves them to a JSON file in flash, then reboots.
+
+Add a watchdog timer to the MicroPython main loop so the ESP32 automatically
+resets if the main task hangs for more than 30 seconds.
+
+-- Bugs / refactors --
+
+The MicroPython MQTT client disconnects after a few hours and never reconnects.
+Add reconnection logic with exponential backoff that retries every 5, 10, 30,
+and 60 seconds.
+
+The ESP32 runs out of heap memory after 12 hours. Profile the MicroPython
+script, identify objects that are not being garbage-collected, and fix the
+memory leak.
+
+The DHT22 read occasionally returns None. Add retry logic (up to 3 attempts
+with 1-second delays) and log a warning to UART if all retries fail.
+
+-- Tests --
+
+Write a test suite for the MicroPython sensor module using unittest that
+runs on desktop CPython with a stub for the machine and dht modules, so
+the logic can be tested without physical hardware.
+
+================================================================================

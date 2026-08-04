@@ -26,9 +26,8 @@ Un asistente de código con IA completamente local y sin conexión, impulsado po
 
 **Preset A (recomendado, ~7.3 GB de RAM):**
 ```bash
-ollama pull qwen2.5:0.5b        # orquestador / enrutador
-ollama pull qwen2.5-coder:7b    # agentes coder y lint
-ollama pull phi4-mini:3.8b      # agentes planner y general
+ollama pull phi4-mini:3.8b      # orquestador, planner, breakdown y agente general
+ollama pull qwen2.5-coder:7b    # agentes coder, lint y tester
 ollama pull qwen3-embedding:4b  # embeddings para RAG
 ```
 
@@ -99,15 +98,21 @@ Todos los parámetros pueden configurarse sin tocar el código:
 
 | Variable | Default | Descripción |
 |---|---|---|
+| `LLM_PROVIDER` | `ollama` | Backend LLM: `ollama` (local) o `cloud` (API compatible con OpenAI) |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | URL base cuando `LLM_PROVIDER=cloud` |
+| `LLM_API_KEY` | *(vacío)* | Clave API cuando `LLM_PROVIDER=cloud` |
 | `AGENT_MODEL` | `qwen2.5-coder:7b` | Modelo de respaldo global |
-| `ORCHESTRATOR_MODEL` | `qwen2.5:0.5b` | Modelo de enrutamiento (debe devolver una sola palabra) |
+| `ORCHESTRATOR_MODEL` | `phi4-mini:3.8b` | Modelo de enrutamiento |
 | `CODER_MODEL` | `qwen2.5-coder:7b` | Escritura y edición de código |
 | `LINT_MODEL` | `qwen2.5-coder:7b` | Análisis y corrección de lint |
 | `PLANNER_MODEL` | `phi4-mini:3.8b` | Planificación de implementación |
+| `TESTER_MODEL` | `qwen2.5-coder:7b` | Escritura y ejecución de tests |
+| `BREAKDOWN_MODEL` | `phi4-mini:3.8b` | Descomposición de tareas en pasos |
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Preguntas, búsqueda web, indexado de docs |
 | `STREAM_OUTPUT` | `true` | Transmitir tokens en tiempo real (`false` para desactivar) |
 | `AGENT_MAX_ITER` | `15` | Máximo de iteraciones ReAct por consulta |
-| `LLM_TIMEOUT` | `600` | Segundos antes de que expire una llamada a Ollama (modelos 7b+ necesitan 5-10 min en CPU) |
+| `LLM_TIMEOUT` | `600` | Segundos antes de que expire una llamada LLM (modelos 7b+ necesitan 5-10 min en CPU) |
+| `LLM_MAX_TOKENS` | `4096` | Máximo de tokens por generación LLM; limita salidas excesivas |
 | `BASH_TIMEOUT` | `60` | Segundos antes de que se cancele un comando de shell |
 | `RAG_FETCH_TIMEOUT` | `30` | Segundos antes de que se cancele una descarga de URL (rag_add_url) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | URL base de la API de Ollama |
@@ -128,15 +133,31 @@ CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "rees
 
 ```python
 AGENT_MODELS: dict[str, str] = {
-    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "qwen2.5:0.5b"),
+    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "phi4-mini:3.8b"),
     "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:7b"),
     "lint":         os.getenv("LINT_MODEL",         "qwen2.5-coder:7b"),
     "planner":      os.getenv("PLANNER_MODEL",      "phi4-mini:3.8b"),
+    "tester":       os.getenv("TESTER_MODEL",       "qwen2.5-coder:7b"),
+    "breakdown":    os.getenv("BREAKDOWN_MODEL",    "phi4-mini:3.8b"),
     "general":      os.getenv("GENERAL_MODEL",      "phi4-mini:3.8b"),
 }
 ```
 
 Para cambiar permanentemente la asignación de un modelo, edita el valor de fallback. Para cambiarlo en una sola ejecución, configura la variable de entorno.
+
+### Proveedor cloud (API compatible con OpenAI)
+
+Configura `LLM_PROVIDER=cloud` para enrutar todas las llamadas LLM a cualquier endpoint compatible con OpenAI en lugar de Ollama. Los embeddings siempre permanecen locales vía Ollama.
+
+```bash
+LLM_PROVIDER=cloud \
+LLM_BASE_URL=https://api.groq.com/openai/v1 \
+LLM_API_KEY=sk-... \
+CODER_MODEL=llama-3.3-70b-versatile \
+python agent.py "refactoriza auth.py"
+```
+
+Compatible con Groq, Mistral, Together AI, OpenRouter, vLLM y cualquier otro proveedor compatible con OpenAI. Configura las variables `*_MODEL` de cada agente con los nombres de modelo disponibles en el proveedor objetivo.
 
 ---
 
@@ -154,17 +175,22 @@ Para cambiar permanentemente la asignación de un modelo, edita el valor de fall
 │                                                         │
 │  1. Pre-verificación por palabras clave (sin LLM)       │
 │     docs/rag → general  |  lint/ruff → lint             │
-│     plan/spec → planner |  qué/cómo → general           │
+│     plan/spec → planner |  test/pytest → tester         │
+│     steps/checklist → breakdown                         │
 │  2. Llamada LLM (ORCHESTRATOR_MODEL) para casos         │
 │     ambiguos                                            │
 │  3. Persiste cwd y streaming entre turnos del REPL      │
 └──────┬──────────┬──────────┬──────────┬─────────────────┘
        │          │          │          │
        ▼          ▼          ▼          ▼
-  Planner     Coder       Lint      General
+  Planner     Coder       Lint      Tester
   Agent       Agent       Agent     Agent
-  (phi4-mini) (qwen2.5-   (qwen2.5- (phi4-mini)
-              coder:7b)   coder:7b)
+  (phi4-mini) (qwen2.5-   (qwen2.5- (qwen2.5-
+               coder:7b)   coder:7b)  coder:7b)
+
+  Breakdown   General
+  Agent       Agent
+  (phi4-mini) (phi4-mini)
        │          │          │          │
        └──────────┴──────────┴──────────┘
                          │
@@ -182,6 +208,8 @@ Para cambiar permanentemente la asignación de un modelo, edita el valor de fall
 | **planner** | Planificación, documentos de diseño, especificaciones técnicas | ENTENDER → EXPLORAR → ANALIZAR → REDACTAR → REPORTAR. Solo lectura; guarda `plan_*.md` |
 | **coder** | Escritura, edición, refactorización, corrección de bugs | EXPLORAR → PLANIFICAR → IMPLEMENTAR → VERIFICAR → REPORTAR |
 | **lint** | Errores de lint, violaciones de estilo, calidad de código | DESCUBRIR → LINTEAR → CORREGIR → VERIFICAR → REPORTAR |
+| **tester** | Escritura y ejecución de suites de tests | EXPLORAR → DISEÑAR → ESCRIBIR → EJECUTAR → CONFIRMAR → REPORTAR |
+| **breakdown** | Descomponer una tarea en pasos ordenados y accionables | ENTENDER → EXPLORAR → SECUENCIAR → REPORTAR. Guarda `breakdown_*.md` |
 | **general** | Preguntas, búsqueda web, resúmenes, indexado de documentación | ReAct abierto con todas las herramientas |
 
 ### Comunicación entre agentes
@@ -446,6 +474,8 @@ codeassistant/
 │   ├── planner.py        # Planificación de solo lectura; guarda plan_*.md
 │   ├── coder.py          # Flujo de codificación en 5 fases
 │   ├── lint.py           # Flujo de lint/corrección en 5 fases
+│   ├── tester.py         # Escritura, ejecución y confirmación de tests
+│   ├── breakdown.py      # Descomposición de tareas en pasos ordenados
 │   └── general.py        # Q&A abierto, indexado de docs, búsqueda web
 │
 ├── tools/

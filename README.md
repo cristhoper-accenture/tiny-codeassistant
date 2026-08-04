@@ -26,9 +26,8 @@ A local, fully offline AI code assistant powered by [Ollama](https://ollama.com)
 
 **Preset A (recommended, ~7.3 GB RAM):**
 ```bash
-ollama pull qwen2.5:0.5b        # orchestrator / router
-ollama pull qwen2.5-coder:7b    # coder + lint agents
-ollama pull phi4-mini:3.8b      # planner + general agents
+ollama pull phi4-mini:3.8b      # orchestrator, planner, breakdown + general agents
+ollama pull qwen2.5-coder:7b    # coder, lint + tester agents
 ollama pull qwen3-embedding:4b  # RAG embeddings
 ```
 
@@ -99,15 +98,21 @@ All tunables can be set without touching code:
 
 | Variable | Default | Description |
 |---|---|---|
+| `LLM_PROVIDER` | `ollama` | LLM backend: `ollama` (local) or `cloud` (OpenAI-compatible API) |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL when `LLM_PROVIDER=cloud` |
+| `LLM_API_KEY` | *(empty)* | API key when `LLM_PROVIDER=cloud` |
 | `AGENT_MODEL` | `qwen2.5-coder:7b` | Global fallback model |
-| `ORCHESTRATOR_MODEL` | `qwen2.5:0.5b` | Routing model (needs to output one word) |
+| `ORCHESTRATOR_MODEL` | `phi4-mini:3.8b` | Routing model |
 | `CODER_MODEL` | `qwen2.5-coder:7b` | Code writing and editing |
 | `LINT_MODEL` | `qwen2.5-coder:7b` | Lint analysis and fixing |
 | `PLANNER_MODEL` | `phi4-mini:3.8b` | Implementation planning |
+| `TESTER_MODEL` | `qwen2.5-coder:7b` | Test writing and execution |
+| `BREAKDOWN_MODEL` | `phi4-mini:3.8b` | Task decomposition into steps |
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Q&A, web search, doc indexing |
 | `STREAM_OUTPUT` | `true` | Stream tokens in real time (`false` to disable) |
 | `AGENT_MAX_ITER` | `15` | Max ReAct iterations per query |
-| `LLM_TIMEOUT` | `600` | Seconds before an Ollama call times out (7b+ models need 5-10 min on CPU) |
+| `LLM_TIMEOUT` | `600` | Seconds before an LLM call times out (7b+ models need 5-10 min on CPU) |
+| `LLM_MAX_TOKENS` | `4096` | Max tokens per LLM generation; caps runaway output |
 | `BASH_TIMEOUT` | `60` | Seconds before a shell command is killed |
 | `RAG_FETCH_TIMEOUT` | `30` | Seconds before a URL fetch (rag_add_url) is aborted |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API base URL |
@@ -128,15 +133,31 @@ CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "rewr
 
 ```python
 AGENT_MODELS: dict[str, str] = {
-    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "qwen2.5:0.5b"),
+    "orchestrator": os.getenv("ORCHESTRATOR_MODEL", "phi4-mini:3.8b"),
     "coder":        os.getenv("CODER_MODEL",        "qwen2.5-coder:7b"),
     "lint":         os.getenv("LINT_MODEL",         "qwen2.5-coder:7b"),
     "planner":      os.getenv("PLANNER_MODEL",      "phi4-mini:3.8b"),
+    "tester":       os.getenv("TESTER_MODEL",       "qwen2.5-coder:7b"),
+    "breakdown":    os.getenv("BREAKDOWN_MODEL",    "phi4-mini:3.8b"),
     "general":      os.getenv("GENERAL_MODEL",      "phi4-mini:3.8b"),
 }
 ```
 
 To permanently change a model assignment, edit the fallback string. To change it for a single run, set the env var.
+
+### Cloud provider (OpenAI-compatible API)
+
+Set `LLM_PROVIDER=cloud` to route all LLM calls to any OpenAI-compatible endpoint instead of Ollama. Embeddings always stay local via Ollama.
+
+```bash
+LLM_PROVIDER=cloud \
+LLM_BASE_URL=https://api.groq.com/openai/v1 \
+LLM_API_KEY=sk-... \
+CODER_MODEL=llama-3.3-70b-versatile \
+python agent.py "refactor auth.py"
+```
+
+Compatible with Groq, Mistral, Together AI, OpenRouter, vLLM, and any other OpenAI-compatible provider. Set the per-agent `*_MODEL` env vars to model names available on the target provider.
 
 ---
 
@@ -154,16 +175,21 @@ To permanently change a model assignment, edit the fallback string. To change it
 │                                                         │
 │  1. Keyword pre-check (deterministic, no LLM call)      │
 │     docs/rag → general  |  lint/ruff → lint             │
-│     plan/spec → planner |  what/how → general           │
+│     plan/spec → planner |  test/pytest → tester         │
+│     steps/checklist → breakdown                         │
 │  2. LLM call (ORCHESTRATOR_MODEL) for ambiguous tasks   │
 │  3. Persists cwd and streaming flag across REPL turns   │
 └──────┬──────────┬──────────┬──────────┬─────────────────┘
        │          │          │          │
        ▼          ▼          ▼          ▼
-  Planner     Coder       Lint      General
+  Planner     Coder       Lint      Tester
   Agent       Agent       Agent     Agent
-  (phi4-mini) (qwen2.5-   (qwen2.5- (phi4-mini)
-              coder:7b)   coder:7b)
+  (phi4-mini) (qwen2.5-   (qwen2.5- (qwen2.5-
+               coder:7b)   coder:7b)  coder:7b)
+
+  Breakdown   General
+  Agent       Agent
+  (phi4-mini) (phi4-mini)
        │          │          │          │
        └──────────┴──────────┴──────────┘
                          │
@@ -181,6 +207,8 @@ To permanently change a model assignment, edit the fallback string. To change it
 | **planner** | Planning, design docs, technical specs | UNDERSTAND → EXPLORE → ANALYZE → DRAFT → REPORT. Read-only; saves `plan_*.md` |
 | **coder** | Writing, editing, refactoring, bug fixes | EXPLORE → PLAN → IMPLEMENT → VERIFY → REPORT |
 | **lint** | Lint errors, style violations, code quality | DISCOVER → LINT → FIX → VERIFY → REPORT |
+| **tester** | Writing and running test suites | EXPLORE → DESIGN → WRITE → RUN → CONFIRM → REPORT |
+| **breakdown** | Decomposing a task into ordered, actionable steps | UNDERSTAND → EXPLORE → SEQUENCE → REPORT. Saves `breakdown_*.md` |
 | **general** | Q&A, web search, summaries, doc indexing | Open-ended ReAct with all tools |
 
 ### Agent communication
@@ -445,6 +473,8 @@ codeassistant/
 │   ├── planner.py        # Read-only planning; saves plan_*.md
 │   ├── coder.py          # 5-phase coding workflow
 │   ├── lint.py           # 5-phase lint/fix workflow
+│   ├── tester.py         # Test writing, execution + confirm workflow
+│   ├── breakdown.py      # Task decomposition into ordered steps
 │   └── general.py        # Open-ended Q&A, doc indexing, web search
 │
 ├── tools/

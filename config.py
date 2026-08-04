@@ -1,6 +1,16 @@
 import os
 
+# ── Ollama ────────────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# ── Cloud provider (OpenAI-compatible) ────────────────────────────────────────
+# Set LLM_PROVIDER=cloud plus LLM_BASE_URL and LLM_API_KEY to route all
+# inference to any OpenAI-compatible endpoint (Groq, Mistral, Together,
+# OpenRouter, vLLM, etc.).  AGENT_MODELS entries should then be cloud model
+# names (e.g. "mistral-large-latest").  Embeddings always use Ollama.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")   # "ollama" | "cloud"
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_API_KEY  = os.getenv("LLM_API_KEY", "")
 DEFAULT_MODEL = os.getenv("AGENT_MODEL", "qwen2.5-coder:7b")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITER", "15"))
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "600"))  # seconds; 7b+ models need 5-10 min on CPU

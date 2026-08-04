@@ -43,6 +43,9 @@ LLM output streams token-by-token by default in both REPL and single-shot modes.
 - Disable: `--no-stream` CLI flag or `STREAM_OUTPUT=false` env var
 
 ## Config (config.py) — env vars and defaults
+- LLM_PROVIDER=ollama  (set to "cloud" to use any OpenAI-compatible endpoint)
+- LLM_BASE_URL=https://api.openai.com/v1  (cloud only — swap for Groq, Mistral, OpenRouter, vLLM, …)
+- LLM_API_KEY=  (cloud only — Bearer token sent in Authorization header)
 - OLLAMA_BASE_URL=http://localhost:11434
 - AGENT_MODEL=qwen2.5-coder:3b  (global fallback)
 - AGENT_MODELS (Preset A — balanced, ~7.3 GB, 16 GB RAM / 8 cores target):

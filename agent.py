@@ -14,6 +14,9 @@ Usage:
   python agent.py --no-stream "task"           # disable streaming output
   python agent.py --list-agents                # show available agents
   python agent.py --list-models                # show available Ollama models
+
+Cloud provider (any OpenAI-compatible endpoint):
+  LLM_PROVIDER=cloud LLM_BASE_URL=https://... LLM_API_KEY=sk-... python agent.py
 """
 
 import os
@@ -21,15 +24,20 @@ import argparse
 
 import llm
 from agents import REGISTRY, DEFAULT_AGENT
-from config import AGENT_MODELS, DEFAULT_MODEL
+from config import AGENT_MODELS, DEFAULT_MODEL, LLM_PROVIDER
 
 
 def _preload_models(agent_name: str, model_override: str | None) -> None:
-    """Warm up Ollama models so the first real inference call is fast."""
+    """Warm up Ollama models so the first real inference call is fast.
+
+    Skipped entirely when LLM_PROVIDER=cloud — nothing to load locally.
+    """
+    if LLM_PROVIDER != "ollama":
+        return
+
     if model_override:
         models = [model_override]
     elif agent_name == "orchestrator":
-        # Preload all unique models the orchestrator may delegate to.
         seen: dict[str, None] = {}
         for m in AGENT_MODELS.values():
             seen[m] = None

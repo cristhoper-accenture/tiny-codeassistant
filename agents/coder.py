@@ -9,8 +9,6 @@ Workflow enforced by the system prompt:
   5. Report   — final_answer with summary of changes
 """
 
-import json
-
 try:
     from rich.console import Console
     from rich.panel import Panel
@@ -23,25 +21,6 @@ except ImportError:
     _RICH = False
 
 from agents.base import BaseAgent
-
-# Tools the coder is allowed to use, grouped by phase
-_EXPLORE_TOOLS = [
-    "find_files", "list_dir", "grep_code", "code_outline",
-    "read_file", "read_lines", "git_status", "git_log", "git_diff",
-    "rag_search", "get_snippet", "list_snippets",
-]
-_IMPLEMENT_TOOLS = [
-    "write_file", "edit_file", "bash", "change_dir",
-    "save_snippet", "rag_add_file", "rag_add_text",
-]
-_VERIFY_TOOLS = [
-    "lint", "run_tests", "bash",
-    "git_status", "git_diff", "git_commit", "git_branch",
-]
-_LLM_TOOLS = [
-    "explain_code", "fix_code", "review_code",
-    "websearch", "summarize",
-]
 
 
 class CoderAgent(BaseAgent):

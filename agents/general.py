@@ -94,6 +94,10 @@ Infer a sensible path from the task context; ask in `final_answer` if truly ambi
 
 Use `delegate_to_agent` to hand off a focused sub-task to a specialist:
 - `coder` — writing, editing, or verifying code files
+- `tester` — writing and running test files
+- `lint` — fixing lint/style/formatting errors
+- `planner` — architecture design, specs, and trade-off analysis
+- `breakdown` — step-by-step execution checklists
 - `general` — questions, explanations, web search, summaries
 
 Only delegate when the sub-task is clearly within that agent's specialty.

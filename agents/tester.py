@@ -13,8 +13,6 @@ Workflow:
   6. Report   — final_answer based on the user's answer
 """
 
-import json
-
 try:
     from rich.console import Console
     from rich.panel import Panel

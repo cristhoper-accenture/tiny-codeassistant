@@ -11,10 +11,14 @@ TOOLS: list[dict] = [
         "description": (
             "Hand off a focused sub-task to a specialist agent and get its result back. "
             "Use 'coder' for writing/editing/verifying code files; "
-            "use 'general' for questions, explanations, web search, or summaries."
+            "'tester' for writing and running tests; "
+            "'lint' for fixing lint/style errors; "
+            "'planner' for architecture design and specs; "
+            "'breakdown' for step-by-step execution checklists; "
+            "'general' for questions, explanations, web search, or summaries."
         ),
         "parameters": {
-            "agent": "str — target agent name: 'coder' or 'general'",
+            "agent": "str — target agent name: 'coder', 'tester', 'lint', 'planner', 'breakdown', or 'general'",
             "task": "str — complete, self-contained description of the sub-task",
         },
     },

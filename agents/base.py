@@ -296,7 +296,14 @@ class BaseAgent:
                 self._print_thought(thought)
 
             if action == "final_answer":
-                answer = action_input.get("response", str(action_input))
+                answer = (
+                    action_input.get("response")
+                    or action_input.get("message")
+                    or action_input.get("answer")
+                    or action_input.get("text")
+                    or action_input.get("content")
+                    or str(action_input)
+                )
                 self._print_answer(answer)
                 return answer, self.cwd
 

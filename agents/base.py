@@ -238,10 +238,25 @@ class BaseAgent:
 
     # ── ReAct loop ─────────────────────────────────────────────────────────────
 
+    def _system_prompt_with_memory(self) -> str:
+        """Return the agent's system prompt with the shared memory section appended."""
+        from tools.agent_memory import format_for_prompt
+        base = self.build_system_prompt()
+        memory = format_for_prompt(self.cwd)
+        if not memory:
+            return base
+        return (
+            base
+            + "\n## Shared agent memory\n\n"
+            + "Context persisted from previous agent runs. "
+            + "Use `memory_read` / `memory_write` to access or update it.\n"
+            + f"```json\n{memory}\n```\n"
+        )
+
     def run(self, user_input: str) -> tuple[str, str]:
         """Execute one query. Returns (answer, final_cwd)."""
         messages = [
-            {"role": "system", "content": self.build_system_prompt()},
+            {"role": "system", "content": self._system_prompt_with_memory()},
             {"role": "user", "content": user_input},
         ]
 
@@ -311,7 +326,7 @@ class BaseAgent:
             special_result = self.handle_special_action(action, action_input)
             if special_result is not None:
                 history_special = special_result if len(special_result) <= self._MAX_HISTORY_CHARS else special_result[:self._MAX_HISTORY_CHARS] + "\n[truncated]"
-                messages[0] = {"role": "system", "content": self.build_system_prompt()}
+                messages[0] = {"role": "system", "content": self._system_prompt_with_memory()}
                 messages.append({"role": "user", "content": f"Observation: {history_special}"})
                 continue
 
@@ -321,7 +336,7 @@ class BaseAgent:
             self._print_tool_result(result)
 
             history_result = result if len(result) <= self._MAX_HISTORY_CHARS else result[:self._MAX_HISTORY_CHARS] + "\n[truncated — use read_lines for more]"
-            messages[0] = {"role": "system", "content": self.build_system_prompt()}
+            messages[0] = {"role": "system", "content": self._system_prompt_with_memory()}
             messages.append({"role": "user", "content": f"Observation: {history_result}"})
 
         return "Max iterations reached without a final answer.", self.cwd

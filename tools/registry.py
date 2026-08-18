@@ -2,7 +2,7 @@
 
 import os
 from tools import websearch, file_ops, bash_exec, summarize, snippets, rag
-from tools import code_nav, git_ops, code_tools
+from tools import code_nav, git_ops, code_tools, agent_memory
 
 TOOLS: list[dict] = [
     # ── Agent delegation ─────────────────────────────────────────────────────
@@ -314,6 +314,33 @@ TOOLS: list[dict] = [
             "collection": "str (optional, default 'default')",
         },
     },
+    # ── Shared agent memory ───────────────────────────────────────────────────
+    {
+        "name": "memory_read",
+        "description": (
+            "Read the shared agent memory for this project. "
+            "Contains context from all previous agent runs: files created/modified, "
+            "decisions made, completed steps, pending tasks, and open questions. "
+            "Call this at the start of any session to catch up on prior work."
+        ),
+        "parameters": {
+            "key": "str (optional) — specific key to read; omit to read the full memory",
+        },
+    },
+    {
+        "name": "memory_write",
+        "description": (
+            "Write or update a key in the shared agent memory so other agents "
+            "can pick up the context. Common keys: 'project' (one-line description), "
+            "'files_created' (list), 'files_modified' (list), 'decisions' (list), "
+            "'completed' (list), 'pending' (list), 'notes' (list). "
+            "For list-valued keys, passing a string appends to the list."
+        ),
+        "parameters": {
+            "key": "str — memory key to set or update",
+            "value": "str | list | any — value to store (string appends to existing lists)",
+        },
+    },
 ]
 
 
@@ -465,6 +492,13 @@ def execute_tool(name: str, params: dict, cwd: str) -> tuple[str, str]:
 
         elif name == "rag_delete":
             return rag.delete_doc(params["source"], params.get("collection", "default")), cwd
+
+        # ── Shared agent memory ───────────────────────────────────────────────
+        elif name == "memory_read":
+            return agent_memory.read(cwd, params.get("key")), cwd
+
+        elif name == "memory_write":
+            return agent_memory.write(cwd, params["key"], params["value"]), cwd
 
         else:
             return f"Unknown tool: {name}", cwd

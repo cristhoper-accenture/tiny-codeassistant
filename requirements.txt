@@ -3,3 +3,4 @@ rich>=13.0
 requests>=2.25
 numpy>=1.26
 psutil>=5.9
+PyQt6>=6.6

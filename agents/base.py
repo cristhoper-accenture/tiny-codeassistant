@@ -136,7 +136,8 @@ class BaseAgent:
     label: str = "Assistant"
     border_color: str = "blue"
 
-    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0, streaming: bool = None):
+    def __init__(self, model: str = None, cwd: str = None, _depth: int = 0, streaming: bool = None,
+                 _token_counter: TokenCounter = None):
         # None → use the per-agent model from AGENT_MODELS; explicit value → override for all agents.
         self._model_override = model
         self.model = model if model is not None else AGENT_MODELS.get(self.name, DEFAULT_MODEL)
@@ -144,7 +145,8 @@ class BaseAgent:
         self._depth = _depth
         self._streaming = STREAM_OUTPUT if streaming is None else streaming
         self._monitor = SystemMonitor()
-        self._token_counter = TokenCounter()
+        # Shared counter: sub-agents inherit the parent's so delegation tokens roll up.
+        self._token_counter = _token_counter if _token_counter is not None else TokenCounter()
         # Set by the `ask_clarification` action when an agent stops to ask the user
         # something it cannot determine on its own. The orchestrator reads this after run().
         self._clarification: str | None = None
@@ -181,6 +183,7 @@ class BaseAgent:
         sub = REGISTRY[agent_name](
             model=self._model_override, cwd=self.cwd,
             _depth=self._depth + 1, streaming=self._streaming,
+            _token_counter=self._token_counter,
         )
         answer, new_cwd = sub.run(task)
         self.cwd = new_cwd
@@ -225,7 +228,7 @@ class BaseAgent:
                     stats = self._monitor.stats_text()
                     if stats:
                         t.append(f"  [{stats}]", style="dim cyan")
-                    tok = self._token_counter.stats_text()
+                    tok = self._token_counter.agent_stats_text(self.name)
                     t.append(f"  [{tok}]", style="dim green")
                     live.update(t)
 
@@ -269,7 +272,7 @@ class BaseAgent:
 
         self._monitor.start()
         self._token_counter.start()
-        self._token_counter.record("user", user_input)
+        self._token_counter.record("user", user_input, agent=self.name)
         try:
             return self._run_loop(messages)
         finally:
@@ -284,7 +287,7 @@ class BaseAgent:
         _format_misses = 0
         for _ in range(MAX_ITERATIONS):
             raw = self._call_llm(messages)
-            self._token_counter.record("llm", raw)
+            self._token_counter.record("llm", raw, agent=self.name)
             # Truncate before storing — prevents runaway repetition from filling the context window.
             history_raw = raw if len(raw) <= self._MAX_HISTORY_CHARS else raw[:self._MAX_HISTORY_CHARS] + "\n[truncated]"
             messages.append({"role": "assistant", "content": history_raw})
@@ -424,7 +427,7 @@ class BaseAgent:
 
     def _print_tool_call(self, action: str, params: dict) -> None:
         stats = self._monitor.stats_text()
-        tok = self._token_counter.stats_text()
+        tok = self._token_counter.agent_stats_text(self.name)
         if _RICH:
             title = "[yellow]Tool[/yellow]"
             if stats:
@@ -441,7 +444,7 @@ class BaseAgent:
     def _print_tool_result(self, result: str) -> None:
         preview = result[:500] + ("…" if len(result) > 500 else "")
         stats = self._monitor.stats_text()
-        tok = self._token_counter.stats_text()
+        tok = self._token_counter.agent_stats_text(self.name)
         if _RICH:
             from rich.markup import escape
             footer = f"[dim]cwd: {self._cwd_display()}"

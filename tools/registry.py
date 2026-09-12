@@ -31,6 +31,17 @@ TOOLS: list[dict] = [
             "max_results": "int (optional, default 5) — number of results to return",
         },
     },
+    {
+        "name": "read_url",
+        "description": (
+            "Fetch a URL and return its readable text content. "
+            "Use after websearch to read the full content of a result page."
+        ),
+        "parameters": {
+            "url": "str — the URL to fetch",
+            "max_chars": "int (optional, default 8000) — truncate output to this many characters",
+        },
+    },
     # ── File ops ─────────────────────────────────────────────────────────────
     {
         "name": "read_file",
@@ -351,6 +362,9 @@ def execute_tool(name: str, params: dict, cwd: str) -> tuple[str, str]:
         if name == "websearch":
             results = websearch.search(params["query"], params.get("max_results", 5))
             return websearch.format_results(results), cwd
+
+        elif name == "read_url":
+            return websearch.read_url(params["url"], params.get("max_chars", 8000)), cwd
 
         # ── File ops ─────────────────────────────────────────────────────────
         elif name == "read_file":

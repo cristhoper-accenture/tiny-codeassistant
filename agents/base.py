@@ -11,6 +11,7 @@ import llm
 from config import DEFAULT_MODEL, AGENT_MODELS, MAX_ITERATIONS, STREAM_OUTPUT
 from tools.registry import TOOLS, execute_tool
 from tools.sysmon import SystemMonitor
+from tools.token_counter import TokenCounter
 
 try:
     from rich.console import Console
@@ -143,6 +144,7 @@ class BaseAgent:
         self._depth = _depth
         self._streaming = STREAM_OUTPUT if streaming is None else streaming
         self._monitor = SystemMonitor()
+        self._token_counter = TokenCounter()
         # Set by the `ask_clarification` action when an agent stops to ask the user
         # something it cannot determine on its own. The orchestrator reads this after run().
         self._clarification: str | None = None
@@ -223,6 +225,8 @@ class BaseAgent:
                     stats = self._monitor.stats_text()
                     if stats:
                         t.append(f"  [{stats}]", style="dim cyan")
+                    tok = self._token_counter.stats_text()
+                    t.append(f"  [{tok}]", style="dim green")
                     live.update(t)
 
                 llm.chat(messages, model=self.model, on_chunk=_on_chunk)
@@ -264,10 +268,13 @@ class BaseAgent:
         ]
 
         self._monitor.start()
+        self._token_counter.start()
+        self._token_counter.record("user", user_input)
         try:
             return self._run_loop(messages)
         finally:
             self._monitor.stop()
+            self._token_counter.stop()
 
     # Max chars kept in message history for a single assistant turn or tool result.
     # Prevents context-window overflow when small models generate very long repetitive text.
@@ -277,6 +284,7 @@ class BaseAgent:
         _format_misses = 0
         for _ in range(MAX_ITERATIONS):
             raw = self._call_llm(messages)
+            self._token_counter.record("llm", raw)
             # Truncate before storing — prevents runaway repetition from filling the context window.
             history_raw = raw if len(raw) <= self._MAX_HISTORY_CHARS else raw[:self._MAX_HISTORY_CHARS] + "\n[truncated]"
             messages.append({"role": "assistant", "content": history_raw})
@@ -416,34 +424,37 @@ class BaseAgent:
 
     def _print_tool_call(self, action: str, params: dict) -> None:
         stats = self._monitor.stats_text()
+        tok = self._token_counter.stats_text()
         if _RICH:
             title = "[yellow]Tool[/yellow]"
             if stats:
                 title += f"  [dim]{stats}[/dim]"
+            title += f"  [dim green]{tok}[/dim green]"
             _console.print(Panel(
                 f"[bold cyan]{action}[/bold cyan]\n{json.dumps(params, indent=2)}",
                 title=title, border_style="yellow",
             ))
         else:
             stats_str = f"  [{stats}]" if stats else ""
-            print(f"\n[Tool] {action}({json.dumps(params)}){stats_str}")
+            print(f"\n[Tool] {action}({json.dumps(params)}){stats_str}  [{tok}]")
 
     def _print_tool_result(self, result: str) -> None:
         preview = result[:500] + ("…" if len(result) > 500 else "")
         stats = self._monitor.stats_text()
+        tok = self._token_counter.stats_text()
         if _RICH:
             from rich.markup import escape
             footer = f"[dim]cwd: {self._cwd_display()}"
             if stats:
                 footer += f"  ·  {stats}"
-            footer += "[/dim]"
+            footer += f"  ·  {tok}[/dim]"
             _console.print(Panel(
                 f"{escape(preview)}\n{footer}",
                 title="[green]Result[/green]", border_style="green",
             ))
         else:
             stats_str = f"  [{stats}]" if stats else ""
-            print(f"[Result] {preview}\n[cwd: {self.cwd}]{stats_str}")
+            print(f"[Result] {preview}\n[cwd: {self.cwd}]{stats_str}  [{tok}]")
 
     def _print_format_warning(self, raw: str) -> None:
         preview = raw[:120] + ("…" if len(raw) > 120 else "")

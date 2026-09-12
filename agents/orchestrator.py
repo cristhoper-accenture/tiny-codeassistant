@@ -1,10 +1,17 @@
 """
-OrchestratorAgent — central router that classifies each task and delegates
-to the most appropriate sub-agent.
+OrchestratorAgent — classifies each task, then either answers it directly with
+the general agent or runs the implementation pipeline.
 
-Routing is done via a fast, single LLM call using a tiny classification
-prompt (no tools, minimal tokens). The selected sub-agent then runs the
-full ReAct loop. CWD is shared and persisted across all turns.
+Flow:
+  1. Classify the request as `general` (a question, explanation, doc lookup,
+     summary — nothing to build) or `pipeline` (build/change/fix code).
+  2. general  → hand off to the general agent, which responds.
+  3. pipeline → run planner → breakdown → coder in sequence, threading each
+     stage's output into the next. If a stage emits `ask_clarification`, the
+     pipeline pauses and the general agent surfaces the question to the user;
+     the answer is fed back and the stage re-runs.
+
+CWD is shared and persisted across all turns.
 """
 
 import os
@@ -15,78 +22,48 @@ from agents.base import BaseAgent
 
 try:
     from rich.console import Console
-    from rich.text import Text
-    from rich.rule import Rule
+    from rich.panel import Panel
+    from rich.prompt import Prompt
+    from rich.markdown import Markdown
 
     _console = Console()
     _RICH = True
 except ImportError:
     _RICH = False
 
-# Each description is exclusive — no overlap with the others.
-# Phrased as "use ONLY when" so the routing LLM can apply the decision tree.
-_AGENT_DESCRIPTIONS = {
-    "lint": (
-        "ONLY for fixing lint/style/formatting errors produced by a linter (ruff, flake8, "
-        "pylint, mypy, eslint). Must NOT change business logic. "
-        "Examples: 'fix ruff errors', 'clean up pylint warnings', 'enforce PEP8 in src/'."
-    ),
-    "coder": (
-        "ONLY for writing, editing, refactoring, or deleting source code files right now. "
-        "Use when actual file changes are needed: add a feature, fix a logic/runtime bug, "
-        "generate tests, update an existing function. "
-        "Examples: 'add rate limiting', 'fix the login crash', 'refactor auth.py', 'write tests for utils'."
-    ),
-    "planner": (
-        "ONLY for producing high-level architecture documents, design specs, risk analyses, and "
-        "interface definitions — no code is written. Use when the user wants to design the "
-        "architecture or think through trade-offs before implementation. "
-        "Examples: 'design the OAuth2 architecture', 'create a technical spec for the new API', "
-        "'what is the best data model for this feature'."
-    ),
-    "tester": (
-        "ONLY for writing test files and running the test suite. Asks the user to confirm results "
-        "before finishing — if user says no, assumes the user will fix it. "
-        "Examples: 'write tests for auth.py', 'add unit tests for the parser', "
-        "'generate pytest tests for utils', 'create a test suite for the API endpoints'."
-    ),
-    "breakdown": (
-        "ONLY for decomposing a task into an ordered, numbered, atomic step-by-step checklist. "
-        "Use when the user knows WHAT to build and wants HOW to execute it step by step. "
-        "No architecture design, no code written. "
-        "Examples: 'break down the migration into steps', 'give me a checklist to add JWT auth', "
-        "'list the steps to deploy this to AWS', 'create a task sequence for the refactor'."
-    ),
-    "general": (
-        "For everything that does NOT require modifying source code: answer questions, "
-        "explain concepts or code, search the web, summarize text, index or refresh "
-        "library documentation in the RAG knowledge base, manage snippets. "
-        "Examples: 'what is a decorator?', 'explain this function', 'search httpx docs', "
-        "'update the FastAPI docs in the knowledge base'."
-    ),
-}
+# Ordered stages of the implementation pipeline.
+_PIPELINE = ("planner", "breakdown", "coder")
 
-_ROUTE_PROMPT = """You are a task router. Pick one agent using this priority order — stop at the first match:
+# Max clarification rounds per stage before proceeding with whatever we have.
+_MAX_CLARIFY_ROUNDS = 2
 
-1. lint      — task is ONLY about running a linter and fixing style/formatting (no logic changes)
-2. tester    — task is about writing test files or running the test suite
-3. coder     — task requires writing or editing source code files right now
-4. planner   — task requires high-level architecture design, a spec, or trade-off analysis (no code)
-5. breakdown — task requires an ordered step-by-step checklist for how to execute something (no code)
-6. general   — everything else: questions, explanations, web search, doc indexing, snippets
+_CLASSIFY_PROMPT = """You classify a developer's request into exactly one mode.
 
-Agent definitions:
-{agent_lines}
+- general: a question, explanation, concept, code walkthrough, web search, \
+documentation lookup/indexing, or summary. Nothing needs to be built or changed.
+  Examples: "what is a decorator?", "explain this function", "search the httpx docs",
+            "summarize this file", "index the FastAPI documentation".
+- pipeline: the user wants to build, implement, add, change, refactor, fix, or \
+otherwise produce or modify code. This runs planner -> breakdown -> coder.
+  Examples: "add rate limiting", "fix the login crash", "refactor auth.py",
+            "build a CLI for the parser", "add OAuth2 login".
 
-Respond with ONLY the agent name (lint / tester / coder / planner / breakdown / general), one word, no punctuation.
+Respond with ONLY one word: general OR pipeline
 
 User request: {request}
-Agent:"""
+Mode:"""
 
-
-def _build_route_prompt(request: str) -> str:
-    lines = "\n".join(f'- "{name}": {desc}' for name, desc in _AGENT_DESCRIPTIONS.items())
-    return _ROUTE_PROMPT.format(agent_lines=lines, request=request)
+# Question words / doc signals that reliably mean "general context" — skip the LLM.
+_GENERAL_WORDS = {
+    "what", "why", "how", "when", "where", "who", "which",
+    "explain", "describe", "summarize", "summarise", "define",
+    "docs", "documentation", "ingest", "rag", "readthedocs", "changelog",
+}
+# Verbs that reliably mean "build/change code" — skip the LLM and go straight to pipeline.
+_PIPELINE_WORDS = {
+    "implement", "refactor", "rewrite", "scaffold", "build", "add",
+    "create", "fix", "change", "update", "migrate", "delete", "remove",
+}
 
 
 class OrchestratorAgent(BaseAgent):
@@ -94,7 +71,7 @@ class OrchestratorAgent(BaseAgent):
     label = "Orchestrator"
     border_color = "white"
 
-    # Fast model for routing — uses AGENT_MODELS["orchestrator"] from config.
+    # Fast model for classification — uses AGENT_MODELS["orchestrator"] from config.
     @property
     def _ROUTER_MODEL(self) -> str:
         return AGENT_MODELS.get("orchestrator", DEFAULT_MODEL)
@@ -104,103 +81,103 @@ class OrchestratorAgent(BaseAgent):
         # but required by BaseAgent's abstract interface.
         return ""
 
-    # ── Routing ────────────────────────────────────────────────────────────────
+    # ── Classification ───────────────────────────────────────────────────────────
 
-    def route(self, user_input: str) -> str:
-        """Return the name of the sub-agent best suited for user_input."""
-        text  = user_input.lower()
-        words = set(text.split())
+    def classify(self, user_input: str) -> str:
+        """Return 'general' or 'pipeline' for user_input."""
+        words = set(user_input.lower().split())
 
-        # Fast pre-check: strong keyword signals bypass the LLM entirely.
-        # Ordered from most-specific to least-specific to avoid false matches.
-        _pre = self._keyword_route(words, text)
-        if _pre:
-            return _pre
+        # Fast keyword pre-check: build verbs win over question words
+        # ("fix the bug and explain why" is still an implementation task).
+        if words & _PIPELINE_WORDS:
+            return "pipeline"
+        if words & _GENERAL_WORDS:
+            return "general"
 
-        # LLM routing for genuinely ambiguous requests.
-        prompt = _build_route_prompt(user_input)
+        # LLM tie-breaker for genuinely ambiguous requests.
         raw = llm.chat(
-            [{"role": "user", "content": prompt}],
+            [{"role": "user", "content": _CLASSIFY_PROMPT.format(request=user_input)}],
             model=self._ROUTER_MODEL,
         ).strip().lower()
-
-        first_word = raw.split()[0].strip(".:,\"'") if raw else ""
-        from agents import REGISTRY
-        if first_word in REGISTRY and first_word != "orchestrator":
-            return first_word
-
-        # Final heuristic fallback if the LLM returned something unexpected.
-        return self._keyword_route(words, text) or "general"
-
-    @staticmethod
-    def _keyword_route(words: set[str], text: str = "") -> str | None:
-        """Return an agent name if strong, unambiguous keywords match, else None.
-
-        Priority: lint > tester > breakdown > coder > planner > general.
-        `text` is the lowercased original input — used for reliable multi-word phrase matching.
-        """
-        # Lint — linter tool names are always unambiguous
-        if words & {"lint", "linter", "linting", "flake8", "ruff", "pylint",
-                    "eslint", "mypy", "bandit", "pycodestyle", "pyflakes"}:
-            return "lint"
-
-        # Tester — checked before coder so "write tests" beats the weak "write" coder signal
-        _test_tool_words = {"pytest", "unittest", "jest", "mocha", "vitest"}
-        _test_phrases = (
-            "write tests", "add tests", "create tests", "generate tests",
-            "unit tests", "integration tests", "test suite", "test file",
-            "write test", "add test", "create test",
-        )
-        if words & _test_tool_words or any(p in text for p in _test_phrases):
-            return "tester"
-
-        # Breakdown — checked before coder so "sequence for the auth refactor" beats "refactor"
-        _breakdown_words = {
-            "breakdown", "checklist", "steps", "sequence",
-            "roadmap", "milestones", "decompose", "decomposition",
-            "tasklist", "sprint", "iterations",
-        }
-        _breakdown_phrases = (
-            "break down", "step by step", "step-by-step", "task sequence", "task list",
-        )
-        if words & _breakdown_words or any(p in text for p in _breakdown_phrases):
-            return "breakdown"
-
-        # Coder — action verbs that always mean "write code now"
-        if words & {"implement", "refactor", "rewrite", "scaffold"}:
-            return "coder"
-
-        # Planner — high-level design/architecture intent (checked before weak "create" signal)
-        if words & {"plan", "planify", "spec", "specification", "blueprint",
-                    "architecture", "design", "tradeoff", "trade-off"}:
-            return "planner"
-
-        # "create/build/write/add" are weak coder signals — only use them when there
-        # are no planner or doc-management keywords that would override the intent.
-        _plan_words = {"plan", "spec", "specification", "blueprint", "document", "doc", "docs"}
-        if words & {"create", "build", "write", "add", "generate"} and not words & _plan_words:
-            return "coder"
-
-        # General — doc-indexing signals and pure question words
-        if words & {"docs", "documentation", "ingest", "rag", "readthedocs", "changelog"}:
+        first = raw.split()[0].strip(".:,\"'") if raw else ""
+        if first == "general":
             return "general"
-        if words & {"what", "why", "when", "where", "explain", "describe", "summarize", "summarise"}:
-            return "general"
-
-        return None
+        return "pipeline"
 
     # ── Run ────────────────────────────────────────────────────────────────────
 
     def run(self, user_input: str) -> tuple[str, str]:
-        agent_name = self.route(user_input)
-        self._print_routing(agent_name, user_input)
+        mode = self.classify(user_input)
 
+        if mode == "general":
+            self._print_routing("general", user_input)
+            answer = self._run_agent("general", user_input)
+            return answer, self.cwd
+
+        return self._run_pipeline(user_input)
+
+    def _run_pipeline(self, user_input: str) -> tuple[str, str]:
+        self._print_pipeline_start()
+        outputs: dict[str, str] = {}
+        clarifications: list[str] = []
+
+        for stage in _PIPELINE:
+            self._print_routing(stage, user_input)
+            answer = ""
+            for attempt in range(_MAX_CLARIFY_ROUNDS + 1):
+                task = self._compose_task(user_input, outputs, clarifications)
+                sub = self._make_agent(stage)
+                answer, self.cwd = sub.run(task)
+
+                question = getattr(sub, "_clarification", None)
+                if question and attempt < _MAX_CLARIFY_ROUNDS:
+                    user_answer = self._clarify(stage, question)
+                    clarifications.append(f"Q ({stage}): {question}\nA: {user_answer}")
+                    continue
+                break
+            outputs[stage] = answer
+
+        # The coder's report is the pipeline's final answer.
+        return outputs.get("coder", ""), self.cwd
+
+    def _compose_task(
+        self, user_input: str, outputs: dict[str, str], clarifications: list[str]
+    ) -> str:
+        """Thread the original request plus upstream stage outputs into the next stage."""
+        parts = [f"User request:\n{user_input}"]
+        if outputs.get("planner"):
+            parts.append(f"Implementation plan (from the planner agent):\n{outputs['planner']}")
+        if outputs.get("breakdown"):
+            parts.append(f"Step-by-step breakdown (from the breakdown agent):\n{outputs['breakdown']}")
+        if clarifications:
+            parts.append("User clarifications (answered during this pipeline):\n" + "\n\n".join(clarifications))
+        return "\n\n---\n\n".join(parts)
+
+    def _make_agent(self, name: str) -> BaseAgent:
         from agents import REGISTRY
-        # Propagate model override and streaming preference to sub-agents.
-        sub = REGISTRY[agent_name](model=self._model_override, cwd=self.cwd, streaming=self._streaming)
-        answer, new_cwd = sub.run(user_input)
-        self.cwd = new_cwd  # persist cwd for the next turn
-        return answer, new_cwd
+        return REGISTRY[name](model=self._model_override, cwd=self.cwd, streaming=self._streaming)
+
+    def _run_agent(self, name: str, task: str) -> str:
+        sub = self._make_agent(name)
+        answer, self.cwd = sub.run(task)
+        return answer
+
+    def _clarify(self, stage: str, question: str) -> str:
+        """A pipeline stage is blocked — the general agent surfaces the question to the user."""
+        self._print_routing("general", f"clarifying for {stage}")
+        prompt_text = (
+            f"The {stage} agent needs input to continue:\n\n{question}\n\n"
+            "Please provide the answer."
+        )
+        if _RICH:
+            _console.print(Panel(
+                Markdown(f"**The {stage} agent needs input to continue:**\n\n{question}"),
+                title="[bold blue]Assistant[/bold blue]",
+                border_style="blue",
+            ))
+            return Prompt.ask("[bold blue]Your answer[/bold blue]")
+        print(f"\n{prompt_text}")
+        return input("Your answer: ").strip()
 
     # ── REPL (overrides BaseAgent to show orchestrator banner) ─────────────────
 
@@ -223,6 +200,13 @@ class OrchestratorAgent(BaseAgent):
             self.run(user_input)
 
     # ── Display ────────────────────────────────────────────────────────────────
+
+    def _print_pipeline_start(self) -> None:
+        arrow = " → ".join(_PIPELINE)
+        if _RICH:
+            _console.print(f"\n[dim]Running implementation pipeline:[/dim] [bold]{arrow}[/bold]")
+        else:
+            print(f"\n[Orchestrator] pipeline: {arrow}")
 
     def _print_routing(self, agent_name: str, user_input: str) -> None:
         colors = {"coder": "magenta", "general": "blue", "lint": "yellow", "planner": "cyan", "breakdown": "green", "tester": "bright_blue"}

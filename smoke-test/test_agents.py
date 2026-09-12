@@ -207,31 +207,31 @@ def test_orchestrator_instantiation():
     assert o.cwd == SMOKE_DIR
 
 
-def test_orchestrator_routes_coder():
+def test_orchestrator_classifies_pipeline():
     from agents import OrchestratorAgent
     o = OrchestratorAgent(model="qwen3.5:2b", cwd=SMOKE_DIR)
-    # Coding tasks
+    # Implementation tasks run the planner → breakdown → coder pipeline
     for prompt in [
-        "write a function that reverses a string",
         "create a new file called app.py",
         "fix the bug in my code",
         "implement a binary search",
+        "refactor the auth module",
     ]:
-        result = o.route(prompt)
-        assert result == "coder", f"Expected coder for: {prompt!r}, got {result!r}"
+        result = o.classify(prompt)
+        assert result == "pipeline", f"Expected pipeline for: {prompt!r}, got {result!r}"
 
 
-def test_orchestrator_routes_general():
+def test_orchestrator_classifies_general():
     from agents import OrchestratorAgent
     o = OrchestratorAgent(model="qwen3.5:2b", cwd=SMOKE_DIR)
-    # General / informational tasks
+    # General / informational tasks go straight to the general agent
     for prompt in [
         "what is a REST API?",
         "explain what async/await does",
-        "search for python tutorial",
         "summarize this document",
+        "why does this function fail?",
     ]:
-        result = o.route(prompt)
+        result = o.classify(prompt)
         assert result == "general", f"Expected general for: {prompt!r}, got {result!r}"
 
 
@@ -278,8 +278,8 @@ if __name__ == "__main__":
         # orchestrator
         ("Orchestrator in registry as default", test_orchestrator_in_registry),
         ("OrchestratorAgent instantiation", test_orchestrator_instantiation),
-        ("Orchestrator routes coding tasks → coder", test_orchestrator_routes_coder),
-        ("Orchestrator routes questions → general", test_orchestrator_routes_general),
+        ("Orchestrator classifies coding tasks → pipeline", test_orchestrator_classifies_pipeline),
+        ("Orchestrator classifies questions → general", test_orchestrator_classifies_general),
         ("Orchestrator cwd persists across turns", test_orchestrator_cwd_persists),
         # code_nav
         ("find_files finds agent.py", test_find_files),

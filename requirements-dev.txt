@@ -1,0 +1,8 @@
+# Development / smoke-test extras — NOT required to run the assistant.
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# smoke-test/dashboard.py — local metrics dashboard demo
+dash>=2.0
+pandas>=2.0
+plotly>=5.0

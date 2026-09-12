@@ -1,6 +1,6 @@
 # Code Assistant
 
-Un asistente de código con IA completamente local y sin conexión, impulsado por [Ollama](https://ollama.com). Ejecuta un bucle ReAct multi-agente — un orquestador clasifica cada tarea y la dirige al agente especialista adecuado, el cual razona paso a paso y llama a herramientas hasta completar la tarea. Sin APIs externas, sin nube, ningún dato sale de tu máquina.
+Un asistente de código con IA completamente local y sin conexión, impulsado por [Ollama](https://ollama.com). Ejecuta un bucle ReAct multi-agente — un orquestador clasifica cada tarea como una pregunta **general** (respondida por el agente general) o una tarea de **implementación**, que ejecuta a través de un pipeline **planner → breakdown → coder**. Cada agente razona paso a paso y llama a herramientas hasta completar la tarea. Sin APIs externas, sin nube, ningún dato sale de tu máquina.
 
 ---
 
@@ -12,10 +12,11 @@ Un asistente de código con IA completamente local y sin conexión, impulsado po
 4. [Configuración](#configuración)
 5. [Arquitectura de agentes](#arquitectura-de-agentes)
 6. [RAG de documentación](#rag-de-documentación)
-7. [Streaming](#streaming)
-8. [BaseAgent — la clase base](#baseagent--la-clase-base)
-9. [Referencia de herramientas](#referencia-de-herramientas)
-10. [Extender el sistema](#extender-el-sistema)
+7. [Memoria compartida entre agentes](#memoria-compartida-entre-agentes)
+8. [Streaming](#streaming)
+9. [BaseAgent — la clase base](#baseagent--la-clase-base)
+10. [Referencia de herramientas](#referencia-de-herramientas)
+11. [Extender el sistema](#extender-el-sistema)
 
 ---
 
@@ -163,71 +164,111 @@ Compatible con Groq, Mistral, Together AI, OpenRouter, vLLM y cualquier otro pro
 
 ## Arquitectura de agentes
 
+```mermaid
+graph TD
+    CLI["CLI — agent.py\n--agent · --model · --cwd · --no-stream · query"]
+    CLI --> ORC
+
+    ORC["OrchestratorAgent · phi4-mini:3.8b\nclasifica → general | pipeline\n① pre-verificación por palabras clave · ② desempate por LLM"]
+
+    ORC -->|contexto general| GENERAL
+    ORC -->|implementación| PIPE
+
+    subgraph PIPE["Pipeline de implementación — secuencial; la salida de cada etapa alimenta la siguiente"]
+        PLANNER["PlannerAgent\nphi4-mini:3.8b\nENTENDER → EXPLORAR → ANALIZAR → REDACTAR → REPORTAR"]
+        BREAKDOWN["BreakdownAgent\nphi4-mini:3.8b\nENTENDER → EXPLORAR → SECUENCIAR → REPORTAR"]
+        CODER["CoderAgent\nqwen2.5-coder:7b\nEXPLORAR → PLANIFICAR → IMPLEMENTAR → VERIFICAR → REPORTAR"]
+        PLANNER -->|plan| BREAKDOWN
+        BREAKDOWN -->|checklist| CODER
+    end
+
+    GENERAL["GeneralAgent\nphi4-mini:3.8b\nPreguntas · búsqueda web · indexado de docs · snippets\ntambién traslada aclaraciones al usuario"]
+
+    PLANNER -. ask_clarification .-> GENERAL
+    BREAKDOWN -. ask_clarification .-> GENERAL
+    CODER -. ask_clarification .-> GENERAL
+    GENERAL -. "respuesta del usuario (la etapa se re-ejecuta)" .-> PIPE
+
+    CODER -->|delegate_to_agent| TESTER
+    CODER -->|delegate_to_agent| LINT
+
+    subgraph SPEC["Especialistas bajo demanda — el coder delega cuando es necesario"]
+        TESTER["TesterAgent\nqwen2.5-coder:7b\nEXPLORAR → DISEÑAR → ESCRIBIR → EJECUTAR → CONFIRMAR → REPORTAR"]
+        LINT["LintAgent\nqwen2.5-coder:7b\nDESCUBRIR → LINTEAR → CORREGIR → VERIFICAR → REPORTAR"]
+    end
+
+    subgraph infra["Infraestructura Compartida"]
+        TOOLS["Registro de Herramientas — tools/registry.py\nArchivos · Shell · Nav. Código · Git · Code Tools\nBase de Conocimiento · Web · Memoria de Agente · Delegación"]
+        LLM["llm.py\nOllama local  /  Cloud compatible con OpenAI\nchat · embed · preload · list_models"]
+        RAG["rag_store/\ncolección docs · qwen3-embedding:4b"]
+        MEM[".agent_memory.json\nestado compartido entre agentes · auto-inyectado en cada prompt"]
+    end
+
+    PLANNER --> TOOLS
+    BREAKDOWN --> TOOLS
+    CODER --> TOOLS
+    GENERAL --> TOOLS
+    TESTER --> TOOLS
+    LINT --> TOOLS
+
+    TOOLS --> RAG
+    TOOLS --> MEM
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     CLI (agent.py)                      │
-│  --agent  --model  --cwd  --no-stream  query            │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│              OrchestratorAgent                          │
-│                                                         │
-│  1. Pre-verificación por palabras clave (sin LLM)       │
-│     docs/rag → general  |  lint/ruff → lint             │
-│     plan/spec → planner |  test/pytest → tester         │
-│     steps/checklist → breakdown                         │
-│  2. Llamada LLM (ORCHESTRATOR_MODEL) para casos         │
-│     ambiguos                                            │
-│  3. Persiste cwd y streaming entre turnos del REPL      │
-└──────┬──────────┬──────────┬──────────┬─────────────────┘
-       │          │          │          │
-       ▼          ▼          ▼          ▼
-  Planner     Coder       Lint      Tester
-  Agent       Agent       Agent     Agent
-  (phi4-mini) (qwen2.5-   (qwen2.5- (qwen2.5-
-               coder:7b)   coder:7b)  coder:7b)
 
-  Breakdown   General
-  Agent       Agent
-  (phi4-mini) (phi4-mini)
-       │          │          │          │
-       └──────────┴──────────┴──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  Registro de tools  │
-              │  (tools/registry)   │
-              └─────────────────────┘
-```
+### Cómo despacha el orquestador
 
-### Los cuatro agentes especialistas
+El orquestador primero **clasifica** la petición (una pre-verificación rápida por palabras clave, con respaldo en una llamada LLM de una sola palabra para entradas ambiguas):
 
-| Agente | Se invoca para | Flujo de trabajo |
+- **contexto general** — una pregunta, explicación, recorrido de código, búsqueda web, consulta/indexado de docs, o resumen. Se entrega directamente al agente **general**, que responde.
+- **implementación** — cualquier cosa que construya, cambie, refactorice o corrija código. Se ejecuta a través del pipeline de abajo.
+
+### El pipeline de implementación
+
+Para una tarea de implementación el orquestador ejecuta tres agentes **en secuencia**, pasando la salida de cada etapa a la siguiente:
+
+| Etapa | Agente | Produce | Flujo de trabajo |
+|---|---|---|---|
+| 1 | **planner** | diseño/plan (`plan_*.md`) | ENTENDER → EXPLORAR → ANALIZAR → REDACTAR → REPORTAR |
+| 2 | **breakdown** | checklist ordenada (`breakdown_*.md`) | ENTENDER → EXPLORAR → SECUENCIAR → REPORTAR |
+| 3 | **coder** | los cambios de código reales | EXPLORAR → PLANIFICAR → IMPLEMENTAR → VERIFICAR → REPORTAR |
+
+El coder recibe tanto el plan como la checklist como contexto, y su reporte es la respuesta final del pipeline.
+
+### El agente general y los especialistas bajo demanda
+
+| Agente | Rol | Flujo de trabajo |
 |---|---|---|
-| **planner** | Planificación, documentos de diseño, especificaciones técnicas | ENTENDER → EXPLORAR → ANALIZAR → REDACTAR → REPORTAR. Solo lectura; guarda `plan_*.md` |
-| **coder** | Escritura, edición, refactorización, corrección de bugs | EXPLORAR → PLANIFICAR → IMPLEMENTAR → VERIFICAR → REPORTAR |
-| **lint** | Errores de lint, violaciones de estilo, calidad de código | DESCUBRIR → LINTEAR → CORREGIR → VERIFICAR → REPORTAR |
+| **general** | Preguntas, búsqueda web, resúmenes, indexado de docs; también traslada aclaraciones del pipeline | ReAct abierto con todas las herramientas |
 | **tester** | Escritura y ejecución de suites de tests | EXPLORAR → DISEÑAR → ESCRIBIR → EJECUTAR → CONFIRMAR → REPORTAR |
-| **breakdown** | Descomponer una tarea en pasos ordenados y accionables | ENTENDER → EXPLORAR → SECUENCIAR → REPORTAR. Guarda `breakdown_*.md` |
-| **general** | Preguntas, búsqueda web, resúmenes, indexado de documentación | ReAct abierto con todas las herramientas |
+| **lint** | Errores de lint, violaciones de estilo, calidad de código | DESCUBRIR → LINTEAR → CORREGIR → VERIFICAR → REPORTAR |
 
-### Comunicación entre agentes
-
-Cualquier agente de nivel superior (profundidad 0) puede llamar a `delegate_to_agent` para delegar una subtarea:
+`tester` y `lint` **no** se enrutan directamente. El coder los alcanza con `delegate_to_agent` cuando una tarea necesita una suite de tests o una pasada de lint:
 
 ```json
 {
-  "thought": "Necesito buscar el endpoint correcto de la API",
+  "thought": "La implementación está lista; necesito una suite de tests para ella",
   "action": "delegate_to_agent",
   "action_input": {
-    "agent": "general",
-    "task": "Busca en la web la URL de la API de Open-Meteo para el clima actual y devuelve el endpoint exacto."
+    "agent": "tester",
+    "task": "Escribe y ejecuta tests con pytest para el nuevo limitador de tasa en limiter.py."
   }
 }
 ```
 
 La delegación está limitada a un nivel de profundidad para evitar cadenas recursivas.
+
+### Aclaración a mitad del pipeline
+
+Si cualquier etapa del pipeline se bloquea por una decisión que solo el usuario puede tomar, emite una acción `ask_clarification` en lugar de adivinar:
+
+```json
+{
+  "action": "ask_clarification",
+  "action_input": { "question": "¿La caché debe ser por usuario o global?" }
+}
+```
+
+El pipeline se pausa, el agente general traslada la pregunta al usuario, y la respuesta se pasa de vuelta para que la etapa se re-ejecute con la nueva información (limitado a dos rondas de aclaración por etapa).
 
 ### CoderAgent — flujo de 5 fases
 
@@ -287,6 +328,39 @@ python agent.py --agent general "busca en la colección docs la configuración d
 
 ---
 
+## Memoria compartida entre agentes
+
+Cuando varios agentes colaboran en una tarea — el orquestador delega en un coder, que a su vez delega en un tester — necesitan compartir contexto sin repetirlo en cada prompt. Para eso existe la **memoria compartida entre agentes**.
+
+Es un único archivo JSON, `.agent_memory.json`, escrito en el directorio de trabajo (`cwd`). Cada agente puede leerlo y actualizarlo mediante dos herramientas:
+
+| Herramienta | Parámetros | Descripción |
+|---|---|---|
+| `memory_read` | `key?` | Leer toda la memoria, o una sola clave |
+| `memory_write` | `key`, `value` | Establecer o actualizar una clave. Para claves con valor de lista, pasar un string **agrega** (sin duplicados) en lugar de sobrescribir |
+
+### Cómo se usa
+
+- **Se inyecta automáticamente en cada prompt.** Al inicio de cada ejecución, `BaseAgent._system_prompt_with_memory()` (en `agents/base.py`) añade la memoria actual como un bloque JSON al system prompt del agente, de modo que un agente recupera el contexto previo automáticamente — sin necesidad de una lectura explícita.
+- **Las claves conocidas** se muestran primero, en este orden: `project`, `files_created`, `files_modified`, `decisions`, `completed`, `pending`, `notes`. Cualquier clave adicional se añade después.
+- **Sobrevive entre turnos y delegaciones** porque vive en disco en el directorio del proyecto. Elimina `.agent_memory.json` para reiniciarla.
+
+```jsonc
+// .agent_memory.json — ejemplo
+{
+  "project": "Agregar login OAuth2 a la API de Flask",
+  "files_created": ["auth/oauth.py"],
+  "files_modified": ["app.py", "requirements.txt"],
+  "decisions": ["Usar Authlib para el cliente OAuth2"],
+  "completed": ["Conectadas las rutas /login y /callback"],
+  "pending": ["Escribir tests para el manejador de callback"]
+}
+```
+
+> Nota: `.agent_memory.json` es estado de ejecución por proyecto y no se rastrea en git.
+
+---
+
 ## Streaming
 
 La salida del LLM se transmite token por token en modo REPL y de una sola vez por defecto.
@@ -332,7 +406,7 @@ def handle_special_action(self, action, action_input) -> str | None:  # opcional
 ```
 run(user_input)
 │
-├── Construir mensajes: [system_prompt, user_message]
+├── Construir mensajes: [system_prompt (+ memoria compartida), user_message]
 │
 └── para cada iteración (hasta MAX_ITERATIONS):
     │
@@ -415,6 +489,12 @@ run(user_input)
 | `rag_collections` | — | Listar todas las colecciones |
 | `rag_delete` | `source`, `collection?` | Eliminar un documento |
 
+### Memoria compartida entre agentes
+| Herramienta | Parámetros | Descripción |
+|---|---|---|
+| `memory_read` | `key?` | Leer el `.agent_memory.json` compartido — memoria completa o una clave |
+| `memory_write` | `key`, `value` | Establecer/actualizar una clave; los strings se agregan a claves de lista |
+
 ### Delegación de agentes
 | Herramienta | Parámetros | Descripción |
 |---|---|---|
@@ -488,8 +568,10 @@ codeassistant/
 │   ├── websearch.py      # Búsqueda DuckDuckGo via ddgs
 │   ├── summarize.py      # Resumen de texto con LLM
 │   ├── snippets.py       # Store persistente de snippets de código
-│   └── rag.py            # RAG: chunk, embed (numpy), búsqueda coseno
+│   ├── rag.py            # RAG: chunk, embed (numpy), búsqueda coseno
+│   └── agent_memory.py   # Lectura/escritura del .agent_memory.json compartido
 │
 ├── snippets/             # Archivos de snippets guardados (creados en runtime)
-└── rag_store/            # Store vectorial RAG — colección "docs" para docs de librerías
+├── rag_store/            # Store vectorial RAG — colección "docs" para docs de librerías
+└── .agent_memory.json    # Memoria compartida por proyecto (creada en runtime, sin rastrear)
 ```

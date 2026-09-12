@@ -143,6 +143,9 @@ class BaseAgent:
         self._depth = _depth
         self._streaming = STREAM_OUTPUT if streaming is None else streaming
         self._monitor = SystemMonitor()
+        # Set by the `ask_clarification` action when an agent stops to ask the user
+        # something it cannot determine on its own. The orchestrator reads this after run().
+        self._clarification: str | None = None
 
     # ── Subclasses override these ──────────────────────────────────────────────
 
@@ -322,6 +325,17 @@ class BaseAgent:
                 self._print_answer(answer)
                 return answer, self.cwd
 
+            if action == "ask_clarification":
+                question = (
+                    action_input.get("question")
+                    or action_input.get("prompt")
+                    or action_input.get("text")
+                    or str(action_input)
+                )
+                self._clarification = question
+                self._print_clarification(question)
+                return question, self.cwd
+
             # Let subclass handle special actions first
             special_result = self.handle_special_action(action, action_input)
             if special_result is not None:
@@ -447,6 +461,16 @@ class BaseAgent:
             )
         else:
             print(f"\n  [Delegate → {agent_name}] {preview}")
+
+    def _print_clarification(self, question: str) -> None:
+        if _RICH:
+            _console.print(Panel(
+                Markdown(question),
+                title=f"[bold yellow]{self.label} needs clarification[/bold yellow]",
+                border_style="yellow",
+            ))
+        else:
+            print(f"\n=== {self.label} needs clarification ===\n{question}\n")
 
     def _print_answer(self, text: str) -> None:
         if _RICH:

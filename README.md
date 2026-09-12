@@ -1,6 +1,6 @@
 # Code Assistant
 
-A local, fully offline AI code assistant powered by [Ollama](https://ollama.com). It runs a multi-agent ReAct loop — an orchestrator classifies each task and routes it to a specialist agent, which reasons step-by-step and calls tools until the task is complete. No external APIs, no cloud, no data leaves your machine.
+A local, fully offline AI code assistant powered by [Ollama](https://ollama.com). It runs a multi-agent ReAct loop — an orchestrator classifies each task as either a **general** question (answered by the general agent) or an **implementation** task, which it runs through a **planner → breakdown → coder** pipeline. Each agent reasons step-by-step and calls tools until the task is complete. No external APIs, no cloud, no data leaves your machine.
 
 ---
 
@@ -12,10 +12,11 @@ A local, fully offline AI code assistant powered by [Ollama](https://ollama.com)
 4. [Configuration](#configuration)
 5. [Agent Architecture](#agent-architecture)
 6. [Documentation RAG](#documentation-rag)
-7. [Streaming](#streaming)
-8. [BaseAgent — the parent class](#baseagent--the-parent-class)
-9. [Tools reference](#tools-reference)
-10. [Extending the codebase](#extending-the-codebase)
+7. [Shared agent memory](#shared-agent-memory)
+8. [Streaming](#streaming)
+9. [BaseAgent — the parent class](#baseagent--the-parent-class)
+10. [Tools reference](#tools-reference)
+11. [Extending the codebase](#extending-the-codebase)
 
 ---
 
@@ -163,70 +164,111 @@ Compatible with Groq, Mistral, Together AI, OpenRouter, vLLM, and any other Open
 
 ## Agent Architecture
 
+```mermaid
+graph TD
+    CLI["CLI — agent.py\n--agent · --model · --cwd · --no-stream · query"]
+    CLI --> ORC
+
+    ORC["OrchestratorAgent · phi4-mini:3.8b\nclassify → general | pipeline\n① keyword pre-check · ② LLM tie-breaker"]
+
+    ORC -->|general context| GENERAL
+    ORC -->|implementation| PIPE
+
+    subgraph PIPE["Implementation pipeline — sequential; each stage's output feeds the next"]
+        PLANNER["PlannerAgent\nphi4-mini:3.8b\nUNDERSTAND → EXPLORE → ANALYZE → DRAFT → REPORT"]
+        BREAKDOWN["BreakdownAgent\nphi4-mini:3.8b\nUNDERSTAND → EXPLORE → SEQUENCE → REPORT"]
+        CODER["CoderAgent\nqwen2.5-coder:7b\nEXPLORE → PLAN → IMPLEMENT → VERIFY → REPORT"]
+        PLANNER -->|plan| BREAKDOWN
+        BREAKDOWN -->|checklist| CODER
+    end
+
+    GENERAL["GeneralAgent\nphi4-mini:3.8b\nQ&A · web search · doc indexing · snippets\nalso surfaces clarifications to the user"]
+
+    PLANNER -. ask_clarification .-> GENERAL
+    BREAKDOWN -. ask_clarification .-> GENERAL
+    CODER -. ask_clarification .-> GENERAL
+    GENERAL -. "user answer (stage re-runs)" .-> PIPE
+
+    CODER -->|delegate_to_agent| TESTER
+    CODER -->|delegate_to_agent| LINT
+
+    subgraph SPEC["On-demand specialists — coder delegates when needed"]
+        TESTER["TesterAgent\nqwen2.5-coder:7b\nEXPLORE → DESIGN → WRITE → RUN → CONFIRM → REPORT"]
+        LINT["LintAgent\nqwen2.5-coder:7b\nDISCOVER → LINT → FIX → VERIFY → REPORT"]
+    end
+
+    subgraph infra["Shared Infrastructure"]
+        TOOLS["Tool Registry — tools/registry.py\nFile · Shell · Code Nav · Git · Code Tools\nKnowledge Base · Web · Agent Memory · Delegation"]
+        LLM["llm.py\nOllama local  /  Cloud OpenAI-compatible\nchat · embed · preload · list_models"]
+        RAG["rag_store/\ndocs collection · qwen3-embedding:4b"]
+        MEM[".agent_memory.json\ncross-agent shared state · auto-injected into every prompt"]
+    end
+
+    PLANNER --> TOOLS
+    BREAKDOWN --> TOOLS
+    CODER --> TOOLS
+    GENERAL --> TOOLS
+    TESTER --> TOOLS
+    LINT --> TOOLS
+
+    TOOLS --> RAG
+    TOOLS --> MEM
 ```
-┌─────────────────────────────────────────────────────────┐
-│                        CLI (agent.py)                   │
-│  --agent  --model  --cwd  --no-stream  query            │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│              OrchestratorAgent                          │
-│                                                         │
-│  1. Keyword pre-check (deterministic, no LLM call)      │
-│     docs/rag → general  |  lint/ruff → lint             │
-│     plan/spec → planner |  test/pytest → tester         │
-│     steps/checklist → breakdown                         │
-│  2. LLM call (ORCHESTRATOR_MODEL) for ambiguous tasks   │
-│  3. Persists cwd and streaming flag across REPL turns   │
-└──────┬──────────┬──────────┬──────────┬─────────────────┘
-       │          │          │          │
-       ▼          ▼          ▼          ▼
-  Planner     Coder       Lint      Tester
-  Agent       Agent       Agent     Agent
-  (phi4-mini) (qwen2.5-   (qwen2.5- (qwen2.5-
-               coder:7b)   coder:7b)  coder:7b)
 
-  Breakdown   General
-  Agent       Agent
-  (phi4-mini) (phi4-mini)
-       │          │          │          │
-       └──────────┴──────────┴──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │    Tool Registry    │
-              │  (tools/registry)   │
-              └─────────────────────┘
-```
+### How the orchestrator dispatches
 
-### The four specialist agents
+The orchestrator first **classifies** the request (a fast keyword pre-check, falling back to a one-word LLM call for ambiguous input):
 
-| Agent | Invoked for | Workflow |
+- **general context** — a question, explanation, code walkthrough, web search, doc lookup/indexing, or summary. Handed straight to the **general** agent, which responds.
+- **implementation** — anything that builds, changes, refactors, or fixes code. Run through the pipeline below.
+
+### The implementation pipeline
+
+For an implementation task the orchestrator runs three agents **in sequence**, threading each stage's output into the next:
+
+| Stage | Agent | Produces | Workflow |
+|---|---|---|---|
+| 1 | **planner** | design/plan (`plan_*.md`) | UNDERSTAND → EXPLORE → ANALYZE → DRAFT → REPORT |
+| 2 | **breakdown** | ordered checklist (`breakdown_*.md`) | UNDERSTAND → EXPLORE → SEQUENCE → REPORT |
+| 3 | **coder** | the actual code changes | EXPLORE → PLAN → IMPLEMENT → VERIFY → REPORT |
+
+The coder receives both the plan and the breakdown as context, and its report is the pipeline's final answer.
+
+### The general agent and on-demand specialists
+
+| Agent | Role | Workflow |
 |---|---|---|
-| **planner** | Planning, design docs, technical specs | UNDERSTAND → EXPLORE → ANALYZE → DRAFT → REPORT. Read-only; saves `plan_*.md` |
-| **coder** | Writing, editing, refactoring, bug fixes | EXPLORE → PLAN → IMPLEMENT → VERIFY → REPORT |
-| **lint** | Lint errors, style violations, code quality | DISCOVER → LINT → FIX → VERIFY → REPORT |
+| **general** | Q&A, web search, summaries, doc indexing; also surfaces pipeline clarifications | Open-ended ReAct with all tools |
 | **tester** | Writing and running test suites | EXPLORE → DESIGN → WRITE → RUN → CONFIRM → REPORT |
-| **breakdown** | Decomposing a task into ordered, actionable steps | UNDERSTAND → EXPLORE → SEQUENCE → REPORT. Saves `breakdown_*.md` |
-| **general** | Q&A, web search, summaries, doc indexing | Open-ended ReAct with all tools |
+| **lint** | Lint errors, style violations, code quality | DISCOVER → LINT → FIX → VERIFY → REPORT |
 
-### Agent communication
-
-Any top-level agent (depth 0) can call `delegate_to_agent` to hand off a sub-task:
+`tester` and `lint` are **not** routed to directly. The coder reaches them with `delegate_to_agent` when a task needs a test suite or a lint pass:
 
 ```json
 {
-  "thought": "I need to search for the correct API endpoint",
+  "thought": "The implementation is done; I need a test suite for it",
   "action": "delegate_to_agent",
   "action_input": {
-    "agent": "general",
-    "task": "Search the web for the Open-Meteo API URL for current weather and return the exact endpoint."
+    "agent": "tester",
+    "task": "Write and run pytest tests for the new rate limiter in limiter.py."
   }
 }
 ```
 
 Delegation is limited to one level deep to prevent recursive chains.
+
+### Mid-pipeline clarification
+
+If any pipeline stage is blocked by a decision only the user can make, it emits an `ask_clarification` action instead of guessing:
+
+```json
+{
+  "action": "ask_clarification",
+  "action_input": { "question": "Should the cache be per-user or global?" }
+}
+```
+
+The pipeline pauses, the general agent surfaces the question to the user, and the answer is threaded back so the stage re-runs with the new information (capped at two clarification rounds per stage).
 
 ### CoderAgent — 5-phase workflow
 
@@ -286,6 +328,39 @@ python agent.py --agent general "search the docs collection for httpx timeout co
 
 ---
 
+## Shared agent memory
+
+When several agents collaborate on a task — the orchestrator delegating to a coder, which delegates to a tester — they need a way to share context without repeating it in every prompt. That is what the **shared agent memory** provides.
+
+It is a single JSON file, `.agent_memory.json`, written to the working directory (`cwd`). Every agent can read and update it via two tools:
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `memory_read` | `key?` | Read the whole memory, or a single key |
+| `memory_write` | `key`, `value` | Set or update a key. For list-valued keys, passing a string **appends** (deduplicated) rather than overwriting |
+
+### How it is used
+
+- **Auto-injected into every prompt.** At the start of each run, `BaseAgent._system_prompt_with_memory()` (in `agents/base.py`) appends the current memory as a JSON block to the agent's system prompt, so an agent picks up prior context automatically — no explicit read needed.
+- **Well-known keys** are rendered first, in this order: `project`, `files_created`, `files_modified`, `decisions`, `completed`, `pending`, `notes`. Any additional keys are appended after them.
+- **Survives across turns and delegations** because it lives on disk in the project directory. Delete `.agent_memory.json` to reset it.
+
+```jsonc
+// .agent_memory.json — example
+{
+  "project": "Add OAuth2 login to the Flask API",
+  "files_created": ["auth/oauth.py"],
+  "files_modified": ["app.py", "requirements.txt"],
+  "decisions": ["Use Authlib for the OAuth2 client"],
+  "completed": ["Wired the /login and /callback routes"],
+  "pending": ["Write tests for the callback handler"]
+}
+```
+
+> Note: `.agent_memory.json` is per-project runtime state and is not tracked in git.
+
+---
+
 ## Streaming
 
 LLM output streams token by token in both REPL and single-shot modes by default.
@@ -331,7 +406,7 @@ def handle_special_action(self, action, action_input) -> str | None: ...  # opti
 ```
 run(user_input)
 │
-├── Build messages: [system_prompt, user_message]
+├── Build messages: [system_prompt (+ shared agent memory), user_message]
 │
 └── for each iteration (up to MAX_ITERATIONS):
     │
@@ -414,6 +489,12 @@ run(user_input)
 | `rag_collections` | — | List all collections |
 | `rag_delete` | `source`, `collection?` | Remove a document |
 
+### Shared agent memory
+| Tool | Parameters | Description |
+|---|---|---|
+| `memory_read` | `key?` | Read the shared `.agent_memory.json` — full memory or one key |
+| `memory_write` | `key`, `value` | Set/update a key; strings append to list-valued keys |
+
 ### Agent delegation
 | Tool | Parameters | Description |
 |---|---|---|
@@ -487,8 +568,10 @@ codeassistant/
 │   ├── websearch.py      # DuckDuckGo search via ddgs
 │   ├── summarize.py      # LLM-powered text summarization
 │   ├── snippets.py       # Persistent code snippet store
-│   └── rag.py            # RAG: chunk, embed (numpy), cosine search
+│   ├── rag.py            # RAG: chunk, embed (numpy), cosine search
+│   └── agent_memory.py   # Shared .agent_memory.json read/write across agents
 │
 ├── snippets/             # Saved snippet files (created at runtime)
-└── rag_store/            # RAG vector store — "docs" collection for library docs
+├── rag_store/            # RAG vector store — "docs" collection for library docs
+└── .agent_memory.json    # Per-project shared agent memory (created at runtime, untracked)
 ```

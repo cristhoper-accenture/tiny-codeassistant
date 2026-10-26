@@ -27,6 +27,37 @@ from agents import REGISTRY, DEFAULT_AGENT
 from config import AGENT_MODELS, DEFAULT_MODEL, LLM_PROVIDER
 
 
+def _enable_line_editing() -> None:
+    """Enable arrow-key line editing in the REPL and clarification prompts.
+
+    Importing ``readline`` transparently upgrades the builtin ``input()`` (and
+    therefore rich's ``Prompt.ask``) with ←/→ cursor movement, Home/End, word
+    deletion, and ↑/↓ command history. History persists across sessions in
+    ``~/.codeassistant_history``. No-op where readline is unavailable (e.g. a
+    bare Windows console).
+    """
+    try:
+        import readline
+        import atexit
+    except ImportError:
+        return
+
+    histfile = os.path.expanduser("~/.codeassistant_history")
+    try:
+        readline.read_history_file(histfile)
+    except OSError:
+        pass  # no history yet, or unreadable
+    readline.set_history_length(1000)
+    atexit.register(lambda: _safe_write_history(readline, histfile))
+
+
+def _safe_write_history(readline, histfile: str) -> None:
+    try:
+        readline.write_history_file(histfile)
+    except OSError:
+        pass
+
+
 def _preload_models(agent_name: str, model_override: str | None) -> None:
     """Warm up Ollama models so the first real inference call is fast.
 
@@ -90,6 +121,8 @@ def main() -> None:
         for m in llm.list_models():
             print(m)
         return
+
+    _enable_line_editing()
 
     start_cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
     streaming = False if args.no_stream else None  # None → use STREAM_OUTPUT config default

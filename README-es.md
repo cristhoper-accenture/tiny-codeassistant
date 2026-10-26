@@ -93,6 +93,26 @@ python agent.py --list-agents
 python agent.py --list-models
 ```
 
+### Interfaz gráfica de escritorio (PyQt6)
+
+Hay un front-end gráfico en `ui.py` para quienes prefieren una ventana a la
+terminal. Expone los mismos agentes, selector de modelo y selector de directorio
+de trabajo, y transmite los pensamientos, llamadas a herramientas y resultados de
+cada agente a una vista de chat (incluidos los sub-agentes delegados).
+
+```bash
+# Lanzar la interfaz gráfica
+python ui.py
+
+# Iniciarla en un directorio de proyecto específico
+python ui.py --cwd /ruta/a/mi-proyecto
+```
+
+Características: selector de agente, override de modelo editable con un botón **↻**
+que lista los modelos de Ollama instalados, explorador de directorio de trabajo,
+un botón **Preload models**, y un contador de tokens en la barra de estado.
+`PyQt6` viene incluido en `requirements.txt`.
+
 ### Variables de entorno
 
 Todos los parámetros pueden configurarse sin tocar el código:
@@ -111,6 +131,7 @@ Todos los parámetros pueden configurarse sin tocar el código:
 | `BREAKDOWN_MODEL` | `phi4-mini:3.8b` | Descomposición de tareas en pasos |
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Preguntas, búsqueda web, indexado de docs |
 | `STREAM_OUTPUT` | `true` | Transmitir tokens en tiempo real (`false` para desactivar) |
+| `PIPELINE_STAGES` | `planner,breakdown,coder` | Etapas ordenadas para una tarea de implementación; añade `lint`/`tester` para una pasada de verificación tras el coder |
 | `AGENT_MAX_ITER` | `15` | Máximo de iteraciones ReAct por consulta |
 | `LLM_TIMEOUT` | `600` | Segundos antes de que expire una llamada LLM (modelos 7b+ necesitan 5-10 min en CPU) |
 | `LLM_MAX_TOKENS` | `4096` | Máximo de tokens por generación LLM; limita salidas excesivas |
@@ -125,6 +146,26 @@ Ejemplo — usar un modelo de coder más grande para una ejecución:
 ```bash
 CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "reescribe auth.py"
 ```
+
+---
+
+## Seguridad y aislamiento
+
+Este asistente **no está aislado (sandboxed)**. Los agentes ejecutan comandos de
+shell y leen/escriben archivos con todos los privilegios del usuario que lo lanzó.
+
+- **Shell** (herramienta `bash`): una lista de bloqueo de mejor esfuerzo rechaza
+  comandos obviamente destructivos (`rm -rf /` y variantes de espacios/flags,
+  `mkfs`, fork bombs, `sudo`, `shutdown`, escrituras a discos crudos, …). Esto
+  evita accidentes comunes — **no** es una frontera de seguridad y puede eludirse.
+- **Archivos** (`read_file` / `write_file` / `edit_file` / `remove_dir`): las rutas
+  se resuelven relativas al directorio de trabajo, pero **se permiten rutas
+  absolutas y `..`**, por lo que un agente puede tocar cualquier cosa que el
+  usuario pueda.
+
+Úsalo sobre proyectos que estés dispuesto a dejar que modifique, y prefiere
+`--cwd` (o el selector de directorio de `ui.py`) para acotarlo a la carpeta
+deseada.
 
 ---
 

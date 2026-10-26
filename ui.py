@@ -210,6 +210,11 @@ class AgentWorker(QThread):
         agent._print_banner        = _print_banner
         agent._call_llm_inner      = _call_llm_inner
 
+        # Sub-agents spawned via delegate_to_agent are created inside BaseAgent;
+        # this hook lets us patch their display methods too, so their output shows
+        # in the GUI instead of leaking to the terminal.
+        agent._on_subagent_created = lambda sub: w._patch(sub)
+
         # OrchestratorAgent creates sub-agents directly via _make_agent / _run_agent —
         # not through delegate_to_agent — so patch those methods to auto-patch sub-agents.
         if hasattr(agent, '_make_agent'):

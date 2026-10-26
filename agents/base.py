@@ -107,6 +107,83 @@ def _normalize_triple_quotes(text: str) -> str:
     return _TRIPLE_QUOTE_RE.sub(_replace, text)
 
 
+# Long free-text fields that routinely break JSON parsing because small models
+# emit them with real newlines and unescaped quotes. Ordered: the trailing
+# long field is recovered positionally rather than by strict JSON parsing.
+_LONG_FIELDS = ("content", "new_text", "code", "text")
+# Short, single-line fields that may precede the long field in action_input.
+_SHORT_FIELDS = (
+    "path", "name", "language", "framework", "description",
+    "collection", "focus", "url", "query", "error", "message",
+)
+_OBJ_END_RE = re.compile(r'"\s*\}\s*\}')   # closes action_input + outer object
+_FIELD_END_RE = re.compile(r'"\s*\}')      # fallback: closes just action_input
+
+
+def _unescape_json_body(s: str) -> str:
+    """Un-escape a raw string value, tolerating mixed escaped/literal content.
+
+    Handles both well-escaped output (``\\n``, ``\\"``) and the raw literal
+    newlines/quotes small models emit, leaving already-literal characters as-is.
+    """
+    out: list[str] = []
+    mapping = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            out.append(mapping.get(s[i + 1], s[i + 1]))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _salvage_action(text: str) -> dict | None:
+    """Last-resort recovery of an action when strict JSON parsing fails.
+
+    Targets the common small-model failure where a ``write_file``/``edit_file``
+    (or similar) carries a long free-text field with raw newlines and unescaped
+    quotes. Short fields are read with regex; the trailing long field is grabbed
+    positionally up to the object's closing ``"}}``, so interior quotes and
+    newlines can't derail it.
+    """
+    m_action = re.search(r'"action"\s*:\s*"(\w+)"', text)
+    if not m_action:
+        return None
+    action = m_action.group(1)
+
+    m_thought = re.search(r'"thought"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    thought = _unescape_json_body(m_thought.group(1)) if m_thought else ""
+
+    action_input: dict = {}
+    long_start = len(text)
+    for key in _LONG_FIELDS:
+        lm = re.search(r'"' + key + r'"\s*:\s*"', text)
+        if not lm:
+            continue
+        long_start = lm.start()
+        rest = text[lm.end():]
+        ends = list(_OBJ_END_RE.finditer(rest)) or list(_FIELD_END_RE.finditer(rest))
+        if not ends:
+            continue
+        action_input[key] = _unescape_json_body(rest[: ends[-1].start()])
+        break
+
+    # Short fields only count if they appear before the long field, so we don't
+    # pick up a stray match from inside the long value itself.
+    head = text[:long_start]
+    for key in _SHORT_FIELDS:
+        km = re.search(r'"' + key + r'"\s*:\s*"((?:[^"\\]|\\.)*)"', head)
+        if km:
+            action_input[key] = _unescape_json_body(km.group(1))
+
+    if not action_input:
+        return None
+    return {"thought": thought, "action": action, "action_input": action_input}
+
+
 def _clean_action(obj: dict, raw_text: str) -> dict:
     """
     Post-process a parsed action:
@@ -150,6 +227,10 @@ class BaseAgent:
         # Set by the `ask_clarification` action when an agent stops to ask the user
         # something it cannot determine on its own. The orchestrator reads this after run().
         self._clarification: str | None = None
+        # Optional callback invoked with every sub-agent this agent spawns (via
+        # delegate_to_agent). Front-ends (e.g. the GUI) use it to attach their own
+        # display hooks to delegated agents so their output isn't lost.
+        self._on_subagent_created = None
 
     # ── Subclasses override these ──────────────────────────────────────────────
 
@@ -185,6 +266,11 @@ class BaseAgent:
             _depth=self._depth + 1, streaming=self._streaming,
             _token_counter=self._token_counter,
         )
+        # Propagate the spawn hook so nested sub-agents are handled too, then let
+        # any front-end attach its display hooks before the sub-agent runs.
+        sub._on_subagent_created = self._on_subagent_created
+        if self._on_subagent_created:
+            self._on_subagent_created(sub)
         answer, new_cwd = sub.run(task)
         self.cwd = new_cwd
         return f"[Delegated to {agent_name} agent]\n{answer}"
@@ -198,17 +284,63 @@ class BaseAgent:
         'or breaking the task into smaller steps."}}'
     )
 
+    @staticmethod
+    def _error_json(message: str) -> str:
+        """Build a final_answer action that ends the turn with a friendly error."""
+        return json.dumps({
+            "thought": "The LLM backend returned an error.",
+            "action": "final_answer",
+            "action_input": {"response": message},
+        })
+
+    def _llm_error_message(self, exc: Exception) -> str:
+        """Turn a transport/HTTP exception into actionable guidance for the user."""
+        import requests as _req
+        if isinstance(exc, _req.exceptions.HTTPError) and exc.response is not None:
+            status = exc.response.status_code
+            body = (exc.response.text or "")[:300]
+            if status == 404 or "not found" in body.lower():
+                return (
+                    f"Model '{self.model}' was not found on the LLM backend. "
+                    f"Pull it with `ollama pull {self.model}` (or set a valid model "
+                    f"via the matching *_MODEL env var).\nDetails: HTTP {status} {body}"
+                )
+            return f"LLM backend returned HTTP {status}. Details: {body}"
+        if isinstance(exc, _req.exceptions.ConnectionError):
+            return (
+                "Could not reach the LLM backend. Is Ollama running "
+                "(`ollama serve`) and OLLAMA_BASE_URL correct?"
+            )
+        return f"LLM request failed: {type(exc).__name__}: {exc}"
+
     def _call_llm(self, messages: list[dict]) -> str:
         """Call the LLM, streaming tokens to the console when enabled."""
         import requests as _req
         try:
             return self._call_llm_inner(messages)
         except (_req.exceptions.ReadTimeout, _req.exceptions.ConnectionError) as exc:
+            # Connection errors get specific guidance; read-timeouts keep the
+            # existing retry-oriented message.
+            if isinstance(exc, _req.exceptions.ConnectionError):
+                msg = self._llm_error_message(exc)
+                self._print_llm_error(msg)
+                return self._error_json(msg)
             if _RICH:
                 _console.print(f"[bold red]  LLM timeout:[/bold red] [dim]{exc}[/dim]")
             else:
                 print(f"  [LLM timeout] {exc}")
             return self._TIMEOUT_JSON
+        except _req.exceptions.RequestException as exc:
+            # HTTPError (e.g. model-not-found 404) and any other transport failure.
+            msg = self._llm_error_message(exc)
+            self._print_llm_error(msg)
+            return self._error_json(msg)
+
+    def _print_llm_error(self, message: str) -> None:
+        if _RICH:
+            _console.print(f"[bold red]  LLM error:[/bold red] [dim]{message}[/dim]")
+        else:
+            print(f"  [LLM error] {message}")
 
     def _call_llm_inner(self, messages: list[dict]) -> str:
         """Raw LLM call — separated so _call_llm can wrap it with timeout handling."""
@@ -413,7 +545,15 @@ class BaseAgent:
         # Retry after converting Python triple-quoted strings to JSON strings.
         normalized = _normalize_triple_quotes(text)
         if normalized != text:
-            return BaseAgent._try_extract(normalized)
+            result = BaseAgent._try_extract(normalized)
+            if result is not None:
+                return result
+        # Last resort: positionally recover a long-text action (e.g. write_file
+        # whose content has raw newlines / unescaped quotes) that no amount of
+        # JSON repair can parse. Small models hit this constantly.
+        salvaged = _salvage_action(text)
+        if salvaged is not None:
+            return _clean_action(salvaged, text)
         return None
 
     def _cwd_display(self) -> str:

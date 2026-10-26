@@ -93,6 +93,26 @@ python agent.py --list-agents
 python agent.py --list-models
 ```
 
+### Desktop GUI (PyQt6)
+
+A graphical front-end is available in `ui.py` for those who prefer a window over
+the terminal. It exposes the same agents, model picker, and working directory
+chooser, and streams each agent's thoughts, tool calls, and results into a chat
+view (including delegated sub-agents).
+
+```bash
+# Launch the GUI
+python ui.py
+
+# Start it in a specific project directory
+python ui.py --cwd /path/to/my-project
+```
+
+Features: agent selector, editable model override with a **↻** button that lists
+installed Ollama models, working-directory browser, a **Preload models** button,
+and a streaming token counter in the status bar. `PyQt6` ships in
+`requirements.txt`.
+
 ### Environment variable overrides
 
 All tunables can be set without touching code:
@@ -111,6 +131,7 @@ All tunables can be set without touching code:
 | `BREAKDOWN_MODEL` | `phi4-mini:3.8b` | Task decomposition into steps |
 | `GENERAL_MODEL` | `phi4-mini:3.8b` | Q&A, web search, doc indexing |
 | `STREAM_OUTPUT` | `true` | Stream tokens in real time (`false` to disable) |
+| `PIPELINE_STAGES` | `planner,breakdown,coder` | Ordered stages for an implementation task; append `lint`/`tester` for a verification pass after the coder |
 | `AGENT_MAX_ITER` | `15` | Max ReAct iterations per query |
 | `LLM_TIMEOUT` | `600` | Seconds before an LLM call times out (7b+ models need 5-10 min on CPU) |
 | `LLM_MAX_TOKENS` | `4096` | Max tokens per LLM generation; caps runaway output |
@@ -125,6 +146,24 @@ Example — use a larger coder model for one run:
 ```bash
 CODER_MODEL=qwen2.5-coder:7b LLM_TIMEOUT=600 python agent.py --agent coder "rewrite auth.py"
 ```
+
+---
+
+## Safety & sandboxing
+
+This assistant is **not sandboxed**. Agents run shell commands and read/write
+files with the full privileges of the user that launched it.
+
+- **Shell** (`bash` tool): a best-effort block list rejects obviously destructive
+  commands (`rm -rf /` and whitespace/flag variants, `mkfs`, fork bombs, `sudo`,
+  `shutdown`, writes to raw disks, …). This stops common accidents — it is **not**
+  a security boundary and can be bypassed.
+- **Files** (`read_file` / `write_file` / `edit_file` / `remove_dir`): paths are
+  resolved relative to the working directory, but **absolute paths and `..` are
+  allowed**, so an agent can touch anything the user can.
+
+Run it against projects you are willing to let it modify, and prefer `--cwd`
+(or `ui.py`'s directory chooser) to scope it to the intended folder.
 
 ---
 

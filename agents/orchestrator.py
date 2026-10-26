@@ -19,8 +19,10 @@ CWD is shared and persisted across all turns.
 
 import os
 
+import requests
+
 import llm
-from config import AGENT_MODELS, DEFAULT_MODEL
+from config import AGENT_MODELS, DEFAULT_MODEL, PIPELINE_STAGES
 from agents.base import BaseAgent
 
 try:
@@ -34,8 +36,20 @@ try:
 except ImportError:
     _RICH = False
 
-# Ordered stages of the implementation pipeline.
-_PIPELINE = ("planner", "breakdown", "coder")
+# Ordered stages of the implementation pipeline. Configurable via PIPELINE_STAGES;
+# append "lint"/"tester" for a deterministic verification pass after the coder.
+# Resolved lazily (and cached) so an unknown name can't crash a run and so we
+# avoid a circular import with the agents registry at module-load time.
+_PIPELINE_CACHE: tuple[str, ...] | None = None
+
+
+def _resolve_pipeline() -> tuple[str, ...]:
+    global _PIPELINE_CACHE
+    if _PIPELINE_CACHE is None:
+        from agents import REGISTRY
+        valid = [s for s in PIPELINE_STAGES if s in REGISTRY and s != "orchestrator"]
+        _PIPELINE_CACHE = tuple(valid) or ("planner", "breakdown", "coder")
+    return _PIPELINE_CACHE
 
 # Max clarification rounds per stage before proceeding with whatever we have.
 _MAX_CLARIFY_ROUNDS = 2
@@ -119,10 +133,15 @@ class OrchestratorAgent(BaseAgent):
             return "general"
 
         # LLM tie-breaker for genuinely ambiguous requests.
-        raw = llm.chat(
-            [{"role": "user", "content": _CLASSIFY_PROMPT.format(request=user_input)}],
-            model=self._ROUTER_MODEL,
-        ).strip().lower()
+        try:
+            raw = llm.chat(
+                [{"role": "user", "content": _CLASSIFY_PROMPT.format(request=user_input)}],
+                model=self._ROUTER_MODEL,
+            ).strip().lower()
+        except requests.exceptions.RequestException:
+            # Backend unreachable / model missing — route to pipeline; the sub-agent's
+            # _call_llm will surface a precise, actionable error to the user.
+            return "pipeline"
         first = raw.split()[0].strip(".:,\"'") if raw else ""
         if first == "direct":
             return "direct"
@@ -136,10 +155,13 @@ class OrchestratorAgent(BaseAgent):
         mode = self.classify(user_input)
 
         if mode == "direct":
-            answer = llm.chat(
-                [{"role": "user", "content": _DIRECT_PROMPT.format(request=user_input)}],
-                model=self._ROUTER_MODEL,
-            ).strip()
+            try:
+                answer = llm.chat(
+                    [{"role": "user", "content": _DIRECT_PROMPT.format(request=user_input)}],
+                    model=self._ROUTER_MODEL,
+                ).strip()
+            except requests.exceptions.RequestException as exc:
+                answer = self._llm_error_message(exc)
             self._print_answer(answer)
             return answer, self.cwd
 
@@ -155,7 +177,8 @@ class OrchestratorAgent(BaseAgent):
         outputs: dict[str, str] = {}
         clarifications: list[str] = []
 
-        for stage in _PIPELINE:
+        pipeline = _resolve_pipeline()
+        for stage in pipeline:
             self._print_routing(stage, user_input)
             answer = ""
             for attempt in range(_MAX_CLARIFY_ROUNDS + 1):
@@ -171,8 +194,10 @@ class OrchestratorAgent(BaseAgent):
                 break
             outputs[stage] = answer
 
-        # The coder's report is the pipeline's final answer.
-        return outputs.get("coder", ""), self.cwd
+        # The last stage's report is the pipeline's final answer (coder when no
+        # verification stages are configured).
+        final = outputs.get(pipeline[-1], "") or outputs.get("coder", "")
+        return final, self.cwd
 
     def _compose_task(
         self, user_input: str, outputs: dict[str, str], clarifications: list[str]
@@ -183,6 +208,8 @@ class OrchestratorAgent(BaseAgent):
             parts.append(f"Implementation plan (from the planner agent):\n{outputs['planner']}")
         if outputs.get("breakdown"):
             parts.append(f"Step-by-step breakdown (from the breakdown agent):\n{outputs['breakdown']}")
+        if outputs.get("coder"):
+            parts.append(f"Implementation report (from the coder agent):\n{outputs['coder']}")
         if clarifications:
             parts.append("User clarifications (answered during this pipeline):\n" + "\n\n".join(clarifications))
         return "\n\n---\n\n".join(parts)
@@ -242,7 +269,7 @@ class OrchestratorAgent(BaseAgent):
             print(f"\nAssistant: {text}")
 
     def _print_pipeline_start(self) -> None:
-        arrow = " → ".join(_PIPELINE)
+        arrow = " → ".join(_resolve_pipeline())
         if _RICH:
             _console.print(f"\n[dim]Running implementation pipeline:[/dim] [bold]{arrow}[/bold]")
         else:

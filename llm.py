@@ -5,7 +5,7 @@ import os
 import requests
 from config import (
     OLLAMA_BASE_URL, DEFAULT_MODEL, LLM_TIMEOUT, LLM_MAX_TOKENS,
-    LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY,
+    LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, EMBED_MODEL,
 )
 
 _CONNECT_TIMEOUT = 10  # seconds to establish TCP connection
@@ -95,7 +95,10 @@ def _chat_cloud(messages: list[dict], model: str, on_chunk) -> str:
                 if data_str == "[DONE]":
                     break
                 data = json.loads(data_str)
-                chunk = data["choices"][0].get("delta", {}).get("content") or ""
+                choices = data.get("choices")
+                if not choices:  # some providers emit role-only / empty-choices frames
+                    continue
+                chunk = choices[0].get("delta", {}).get("content") or ""
                 if chunk:
                     parts.append(chunk)
                     on_chunk(chunk)
@@ -109,7 +112,7 @@ def _chat_cloud(messages: list[dict], model: str, on_chunk) -> str:
 
 # ── Embeddings ────────────────────────────────────────────────────────────────
 
-def embed(text: str, model: str = "qwen3-embedding:4b") -> list[float]:
+def embed(text: str, model: str = EMBED_MODEL) -> list[float]:
     """Embed text. Always uses Ollama regardless of LLM_PROVIDER."""
     url = f"{OLLAMA_BASE_URL}/api/embeddings"
     resp = requests.post(url, json={"model": model, "prompt": text},
